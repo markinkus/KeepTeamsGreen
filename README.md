@@ -1,10 +1,10 @@
-<p align="center">
-  <img src="logo.png" alt="KeepTeamsGreen Logo" width="400">
-</p>
-
 <h1 align="center">KeepTeamsGreen</h1>
+
 <p align="center">
   Mantieni sempre attivo lo stato verde su Microsoft Teams in modo elegante e discreto.
+</p>
+<p align="center">
+  <img src="logo.png" alt="KeepTeamsGreen Logo" width="200">
 </p>
 KeepTeamsGreen è un applicativo open-source per sistemi Windows, concepito per mantenere attivo lo stato di disponibilità (“verde”) nelle piattaforme di collaborazione come Microsoft Teams.
 Spesso, infatti, dopo alcuni minuti di inattività apparente il sistema segna l’utente come “Assente” (giallo), anche se questi è realmente presente e operativo in attività non rilevate dal sistema (lettura, riflessione, riunioni telefoniche, ecc.).
