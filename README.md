@@ -10,7 +10,7 @@ KeepTeamsGreen è un applicativo open-source per sistemi Windows, concepito per 
 Spesso, infatti, dopo alcuni minuti di inattività apparente il sistema segna l’utente come “Assente” (giallo), anche se questi è realmente presente e operativo in attività non rilevate dal sistema (lettura, riflessione, riunioni telefoniche, ecc.).
 L’applicativo risolve in modo elegante tale problematica, garantendo una continuità di stato senza richiedere interventi manuali costanti.</br>
 
-Disclaimer!
+### Disclaimer!
 Questo progetto non è affiliato, sponsorizzato né approvato da Microsoft.
 Microsoft Teams e il relativo logo sono marchi registrati di Microsoft Corporation.
 
