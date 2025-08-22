@@ -59,3 +59,4 @@ Professionalità: il comportamento simulato è realistico e non invasivo.
 3. Salvare le impostazioni.
 4. Avviare l’esecuzione con il pulsante Start.
 5. (Opzionale) Attivare Avvia minimizzato su Tray per esecuzioni future più discrete.
+6. Tenere Focus sulla finestra Teams.
