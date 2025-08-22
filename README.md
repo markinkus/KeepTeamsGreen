@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="KeepTeamsGreen Logo" width="400">
+  <img src="logo.png" alt="KeepTeamsGreen Logo" width="400">
 </p>
 
 <h1 align="center">KeepTeamsGreen</h1>
