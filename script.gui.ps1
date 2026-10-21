@@ -15,7 +15,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 
 $AppName = 'KeepTeamsGreen'
-$AppVersion = '2.1.1'
+$AppVersion = '2.2.0'
 $AppDataDir = Join-Path $env:APPDATA $AppName
 $LogPath = Join-Path $AppDataDir 'last_run.log'
 $ConfigPath = Join-Path $AppDataDir 'config.json'
@@ -40,10 +40,29 @@ if (-not (Test-Path -LiteralPath $AppDataDir)) {
     New-Item -ItemType Directory -Path $AppDataDir -Force | Out-Null
 }
 
+function Get-AppResourceText {
+    param([string]$Name)
+    # EXE resources take precedence so source files beside the EXE cannot replace them.
+    $assembly = [Reflection.Assembly]::GetEntryAssembly()
+    if ($null -ne $assembly) {
+        $stream = $assembly.GetManifestResourceStream($Name)
+        if ($null -ne $stream) {
+            $reader = New-Object IO.StreamReader -ArgumentList $stream, ([Text.Encoding]::UTF8), $true
+            try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+        }
+    }
+    return [IO.File]::ReadAllText((Join-Path $BaseDir $Name))
+}
+
+. ([scriptblock]::Create((Get-AppResourceText 'local/Rules.ps1')))
+
 function Write-AppLog {
     param([string]$Message)
 
     try {
+        if ((Test-Path -LiteralPath $LogPath) -and (Get-Item -LiteralPath $LogPath).Length -ge 1MB) {
+            Move-Item -LiteralPath $LogPath -Destination ($LogPath + '.previous') -Force
+        }
         $line = '{0:yyyy-MM-dd HH:mm:ss} | {1}' -f (Get-Date), $Message
         Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 -ErrorAction Stop
     } catch { }
@@ -154,6 +173,31 @@ public static class Win32Window {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool DestroyIcon(IntPtr iconHandle);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll")]
+    private static extern bool CloseDesktop(IntPtr handle);
+    [DllImport("user32.dll")]
+    private static extern bool SwitchDesktop(IntPtr handle);
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr handle, int command);
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr handle);
+
+    public static bool IsDesktopUnlocked() {
+        IntPtr desktop = OpenInputDesktop(0, false, 0x0100);
+        if (desktop == IntPtr.Zero) return false;
+        try { return SwitchDesktop(desktop); }
+        finally { CloseDesktop(desktop); }
+    }
+
+    public static bool FocusWindow(IntPtr handle) {
+        if (IsIconic(handle)) ShowWindow(handle, 9);
+        return SetForegroundWindow(handle);
+    }
+
     private static WindowSnapshot ReadWindow(IntPtr handle) {
         if (handle == IntPtr.Zero) {
             return null;
@@ -200,132 +244,7 @@ public static class Win32Window {
 Add-Type -TypeDefinition $win32Source
 
 $script:UIAutomationAvailable = $false
-$presenceProbeSource = @"
-using System;
-using System.Threading.Tasks;
-using System.Windows.Automation;
-
-public sealed class PresenceProbeResult {
-    public string State { get; set; }
-    public string Diagnostic { get; set; }
-}
-
-public static class TeamsPresenceProbe {
-    private static bool Has(string text, string value) {
-        return text.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0;
-    }
-
-    private static string Classify(string text) {
-        if (Has(text, "do not disturb") || Has(text, "non disturbare")) {
-            return "Dnd";
-        }
-        if (Has(text, "offline") || Has(text, "non in linea") || Has(text, "appear offline")) {
-            return "Offline";
-        }
-        if (Has(text, "busy") || Has(text, "occupato") || Has(text, "appear busy") || Has(text, "in a call") || Has(text, "in a meeting")) {
-            return "Busy";
-        }
-        if (Has(text, "away") || Has(text, "assente") || Has(text, "be right back") || Has(text, "torno subito")) {
-            return "Away";
-        }
-        if (Has(text, "available") || Has(text, "disponibile")) {
-            return "Available";
-        }
-        return null;
-    }
-
-    private static bool LooksLikeAccountControl(string text, string automationId) {
-        string combined = text + " " + automationId;
-        return Has(combined, "account") || Has(combined, "profile") ||
-               Has(combined, "avatar") || Has(combined, "presence") ||
-               Has(combined, "availability") || Has(combined, "profilo") ||
-               Has(combined, "gestione account") || Has(combined, "me-control") ||
-               Has(combined, "personbutton");
-    }
-
-    public static PresenceProbeResult Inspect(IntPtr windowHandle) {
-        PresenceProbeResult result = new PresenceProbeResult {
-            State = "Unknown",
-            Diagnostic = "Stato non esposto da Teams"
-        };
-
-        try {
-            AutomationElement root = AutomationElement.FromHandle(windowHandle);
-            if (root == null) {
-                result.Diagnostic = "Finestra Teams non accessibile";
-                return result;
-            }
-
-            System.Windows.Rect windowRect = root.Current.BoundingRectangle;
-            AutomationElementCollection elements = root.FindAll(TreeScope.Descendants, Condition.TrueCondition);
-            int bestScore = -1;
-            string bestState = null;
-
-            for (int index = 0; index < elements.Count && index < 3000; index++) {
-                try {
-                    AutomationElement element = elements[index];
-                    string name = element.Current.Name ?? String.Empty;
-                    string help = element.Current.HelpText ?? String.Empty;
-                    string automationId = element.Current.AutomationId ?? String.Empty;
-                    string content = name + " " + help;
-                    string state = Classify(content);
-                    if (state == null) {
-                        continue;
-                    }
-
-                    int score = 0;
-                    if (LooksLikeAccountControl(content, automationId)) {
-                        score += 100;
-                    }
-
-                    System.Windows.Rect elementRect = element.Current.BoundingRectangle;
-                    if (!windowRect.IsEmpty && !elementRect.IsEmpty) {
-                        bool inHeader = elementRect.Top <= windowRect.Top + 180;
-                        bool onRight = elementRect.Left >= windowRect.Left + (windowRect.Width * 0.45);
-                        if (inHeader && onRight) {
-                            score += 70;
-                        } else if (inHeader) {
-                            score += 20;
-                        }
-                    }
-
-                    ControlType type = element.Current.ControlType;
-                    if (type == ControlType.Button || type == ControlType.Image) {
-                        score += 15;
-                    }
-                    if (String.Equals(name.Trim(), "Available", StringComparison.OrdinalIgnoreCase) ||
-                        String.Equals(name.Trim(), "Disponibile", StringComparison.OrdinalIgnoreCase) ||
-                        String.Equals(name.Trim(), "Away", StringComparison.OrdinalIgnoreCase) ||
-                        String.Equals(name.Trim(), "Assente", StringComparison.OrdinalIgnoreCase) ||
-                        String.Equals(name.Trim(), "Busy", StringComparison.OrdinalIgnoreCase) ||
-                        String.Equals(name.Trim(), "Occupato", StringComparison.OrdinalIgnoreCase)) {
-                        score += 10;
-                    }
-
-                    if (score >= 60 && score > bestScore) {
-                        bestScore = score;
-                        bestState = state;
-                    }
-                } catch { }
-            }
-
-            if (bestState != null) {
-                result.State = bestState;
-                result.Diagnostic = "Stato letto dai controlli accessibili di Teams";
-            }
-        } catch (Exception exception) {
-            result.Diagnostic = exception.Message;
-        }
-        return result;
-    }
-
-    public static Task<PresenceProbeResult> BeginInspect(IntPtr windowHandle) {
-        return Task.Factory.StartNew<PresenceProbeResult>(delegate {
-            return Inspect(windowHandle);
-        });
-    }
-}
-"@
+$presenceProbeSource = (Get-AppResourceText 'local/PresenceText.cs') + [Environment]::NewLine + (Get-AppResourceText 'local/PresenceReader.cs')
 
 try {
     Add-Type -AssemblyName UIAutomationClient
@@ -336,14 +255,16 @@ try {
         [System.Windows.Automation.AutomationIdentifier].Assembly.Location,
         [System.Windows.Rect].Assembly.Location
     ) | Select-Object -Unique
-    Add-Type -TypeDefinition $presenceProbeSource -ReferencedAssemblies $uiaReferences
+    if ($null -eq ('KeepTeamsGreenMonitoring.TeamsPresenceProbe' -as [type])) {
+        Add-Type -TypeDefinition $presenceProbeSource -ReferencedAssemblies $uiaReferences
+    }
     $script:UIAutomationAvailable = $true
 } catch {
     Write-AppLog ("UI Automation non disponibile: {0}" -f $_.Exception.Message)
 }
 
 $ConfigDefaults = [ordered]@{
-    SchemaVersion               = 4
+    SchemaVersion               = 5
     IdleThresholdSeconds        = 120
     JitterIntervalSecondsMin    = 3
     JitterIntervalSecondsMax    = 3
@@ -353,6 +274,15 @@ $ConfigDefaults = [ordered]@{
     MonitorTeamsPresence        = $true
     AlertOnPresenceDrop         = $true
     ShowMascotWhenRunning       = $false
+    MonitorColleagues           = $false
+    ColleagueScanSeconds        = 15
+    ColleagueCooldownSeconds    = 120
+    Colleagues                  = @()
+    ScheduleEnabled             = $false
+    ScheduleDays                = 'Weekdays'
+    ScheduleFrom                = '09:00'
+    ScheduleTo                  = '18:00'
+    RecoverAway                 = $false
 }
 
 $Config = [ordered]@{}
@@ -394,7 +324,7 @@ function Convert-ToBoolean {
 }
 
 function Normalize-Config {
-    $Config['SchemaVersion'] = 4
+    $Config['SchemaVersion'] = 5
     $Config['IdleThresholdSeconds'] = Convert-ToBoundedInt -Value $Config['IdleThresholdSeconds'] -Default 120 -Minimum 5 -Maximum 3600
     $Config['JitterIntervalSecondsMin'] = Convert-ToBoundedInt -Value $Config['JitterIntervalSecondsMin'] -Default 3 -Minimum 1 -Maximum 600
     $Config['JitterIntervalSecondsMax'] = Convert-ToBoundedInt -Value $Config['JitterIntervalSecondsMax'] -Default 3 -Minimum 1 -Maximum 600
@@ -409,6 +339,31 @@ function Normalize-Config {
     $Config['MonitorTeamsPresence'] = Convert-ToBoolean $Config['MonitorTeamsPresence'] $true
     $Config['AlertOnPresenceDrop'] = Convert-ToBoolean $Config['AlertOnPresenceDrop'] $true
     $Config['ShowMascotWhenRunning'] = Convert-ToBoolean $Config['ShowMascotWhenRunning'] $false
+    $Config['MonitorColleagues'] = Convert-ToBoolean $Config['MonitorColleagues'] $false
+    $Config['ScheduleEnabled'] = Convert-ToBoolean $Config['ScheduleEnabled'] $false
+    $Config['RecoverAway'] = Convert-ToBoolean $Config['RecoverAway'] $false
+    $Config['ColleagueScanSeconds'] = Convert-ToBoundedInt -Value $Config['ColleagueScanSeconds'] -Default 15 -Minimum 5 -Maximum 300
+    $Config['ColleagueCooldownSeconds'] = Convert-ToBoundedInt -Value $Config['ColleagueCooldownSeconds'] -Default 120 -Minimum 60 -Maximum 3600
+    if ($Config['ScheduleDays'] -notin @('Everyday', 'Weekdays', 'Weekend')) { $Config['ScheduleDays'] = 'Weekdays' }
+    if (-not (Test-LocalTime $Config['ScheduleFrom'])) { $Config['ScheduleFrom'] = '09:00' }
+    if (-not (Test-LocalTime $Config['ScheduleTo'])) { $Config['ScheduleTo'] = '18:00' }
+    $validContacts = @()
+    $names = @{}
+    foreach ($person in @($Config['Colleagues'])) {
+        if ($null -eq $person) { continue }
+        $name = ([string]$person.Name).Trim()
+        if ($name.Length -lt 3 -or $name.Length -gt 100 -or $names.ContainsKey($name) -or $validContacts.Count -ge 40) { continue }
+        $names[$name] = $true
+        $rule = [string]$person.Rule
+        if ($rule -notin @('Available', 'Change')) { $rule = 'Available' }
+        $days = [string]$person.Days
+        if ($days -notin @('Everyday', 'Weekdays', 'Weekend')) { $days = 'Weekdays' }
+        $from = [string]$person.From; $to = [string]$person.To
+        if (-not (Test-LocalTime $from)) { $from = '09:00' }
+        if (-not (Test-LocalTime $to)) { $to = '18:00' }
+        $validContacts += [pscustomobject]@{ Name = $name; Rule = $rule; Days = $days; From = $from; To = $to; Enabled = (Convert-ToBoolean $person.Enabled $true) }
+    }
+    $Config['Colleagues'] = @($validContacts)
 }
 
 function Load-Config {
@@ -904,6 +859,9 @@ $script:PendingPresenceSince = $null
 $script:PresenceDiagnostic = 'In attesa del primo controllo'
 $script:PresenceTask = $null
 $script:PresenceTaskHandle = [IntPtr]::Zero
+$script:PresenceTaskStartedAt = $null
+$script:LastPresenceReadAt = $null
+$script:ProbeFailureCount = 0
 $script:NextPresenceProbeAt = Get-Date
 $script:LastPresenceChangeAt = $null
 $script:MascotDismissed = $false
@@ -1075,13 +1033,12 @@ function Commit-Presence {
         return
     }
 
-    if ($State -eq 'Disabled') {
+    if ($State -in @('Disabled', 'Unknown')) {
         $previous = $script:CommittedPresence
-        $script:CommittedPresence = 'Disabled'
+        $script:CommittedPresence = $State
         $script:PendingPresence = $null
         $script:PendingPresenceSince = $null
-        Set-Timeline 'Monitor Teams disattivato'
-        Write-AppLog ("Presenza Teams: {0} -> Disabled" -f $previous)
+        Set-Timeline (Get-PresenceDisplayName $State)
         return
     }
 
@@ -1118,6 +1075,7 @@ function Commit-Presence {
     if ($previous -eq 'Available' -and $State -notin @('Available', 'Unknown', 'Disabled') -and [bool]$Config['AlertOnPresenceDrop']) {
         Show-PresenceDropAlert -NewState $State
     }
+    if ($previous -eq 'Available' -and $State -eq 'Away') { Invoke-AwayRecovery }
 }
 
 function Start-PresenceProbe {
@@ -1132,44 +1090,76 @@ function Start-PresenceProbe {
 
     try {
         $script:PresenceTaskHandle = $WindowHandle
-        $script:PresenceTask = [TeamsPresenceProbe]::BeginInspect($WindowHandle)
+        $script:ProbeContactNames = @(Get-DueContactNames)
+        $script:ProbeGeneration = $script:LocalGeneration
+        $script:PresenceTaskStartedAt = Get-Date
+        $script:PresenceTask = [KeepTeamsGreenMonitoring.TeamsPresenceProbe]::BeginInspect($WindowHandle, [string[]]$script:ProbeContactNames)
         $script:NextPresenceProbeAt = (Get-Date).AddSeconds(6)
     } catch {
         $script:PresenceDiagnostic = $_.Exception.Message
         $script:PresenceTask = $null
         $script:NextPresenceProbeAt = (Get-Date).AddSeconds(10)
-        Write-AppLog ("Avvio lettura presenza fallito: {0}" -f $_.Exception.Message)
+        Write-LocalError -Code 'UIA_START' -Detail $_.Exception.GetType().Name
     }
 }
 
 function Receive-PresenceProbe {
-    if ($null -eq $script:PresenceTask -or -not $script:PresenceTask.IsCompleted) {
+    if ($null -eq $script:PresenceTask) { return }
+    if (-not $script:PresenceTask.IsCompleted) {
+        if ($null -ne $script:PresenceTaskStartedAt -and ((Get-Date) - $script:PresenceTaskStartedAt).TotalSeconds -gt 12) {
+            $script:PresenceDiagnostic = 'Lettura Teams in timeout; attesa del provider Windows'
+            Commit-Presence -State 'Unknown'
+            Write-LocalError -Code 'UIA_TIMEOUT' -Detail 'Provider senza risposta; nessun nuovo worker avviato'
+        }
         return
     }
 
     try {
         if ($script:PresenceTask.IsFaulted) {
+            $script:ProbeFailureCount = [Math]::Min(5, $script:ProbeFailureCount + 1)
             $script:PresenceDiagnostic = 'Lettura presenza non riuscita'
             Commit-Presence -State 'Unknown'
+            Write-LocalError -Code 'UIA_READ' -Detail 'Lettura asincrona fallita'
         } else {
             $result = $script:PresenceTask.Result
             if ($null -ne $script:TeamsWindow -and $script:TeamsWindow.Handle -eq $script:PresenceTaskHandle) {
                 $script:PresenceDiagnostic = [string]$result.Diagnostic
-                Commit-Presence -State ([string]$result.State)
+                if (((Get-Date) - $script:PresenceTaskStartedAt).TotalSeconds -le 12 -and $script:ProbeGeneration -eq $script:LocalGeneration) {
+                    $script:LastPresenceReadAt = Get-Date
+                    if ([bool]$Config['MonitorTeamsPresence']) { Commit-Presence -State ([string]$result.State) }
+                    Receive-ContactReadings $result.Contacts
+                    Complete-AwayRecovery ([string]$result.State)
+                    if ($result.Diagnostic -like 'Lettura accessibilita fallita*') {
+                        $script:ProbeFailureCount = [Math]::Min(5, $script:ProbeFailureCount + 1)
+                        Write-LocalError -Code 'UIA_READ' -Detail 'Provider Windows non disponibile'
+                    } else { $script:ProbeFailureCount = 0 }
+                } else {
+                    Commit-Presence -State 'Unknown'
+                }
             }
         }
     } catch {
+        $script:ProbeFailureCount = [Math]::Min(5, $script:ProbeFailureCount + 1)
         $script:PresenceDiagnostic = $_.Exception.Message
         Commit-Presence -State 'Unknown'
-        Write-AppLog ("Lettura presenza fallita: {0}" -f $_.Exception.Message)
+        Write-LocalError -Code 'UIA_READ' -Detail $_.Exception.GetType().Name
     } finally {
         $script:PresenceTask = $null
         $script:PresenceTaskHandle = [IntPtr]::Zero
+        $script:PresenceTaskStartedAt = $null
+        if ($script:ProbeFailureCount -gt 0) {
+            $script:NextPresenceProbeAt = (Get-Date).AddSeconds([Math]::Min(120, 5 * [Math]::Pow(2, $script:ProbeFailureCount)))
+        }
     }
 }
 
 function Update-TeamsMonitor {
     try {
+        if (-not [Win32Window]::IsDesktopUnlocked()) {
+            $script:PresenceDiagnostic = 'Monitor sospeso: Windows bloccato'
+            Commit-Presence -State 'Unknown'
+            return
+        }
         $script:TeamsWindow = Get-TeamsWindow
         $foreground = [Win32Window]::GetForegroundSnapshot()
 
@@ -1183,6 +1173,9 @@ function Update-TeamsMonitor {
             Commit-Presence -State 'Closed'
             return
         }
+        if ($null -ne $script:LastPresenceReadAt -and ((Get-Date) - $script:LastPresenceReadAt).TotalSeconds -gt 20) {
+            Commit-Presence -State 'Unknown'
+        }
 
         if (Test-IsTeamsSnapshot $foreground) {
             $script:TeamsFocusState = 'Focused'
@@ -1193,7 +1186,7 @@ function Update-TeamsMonitor {
         if (-not [bool]$Config['MonitorTeamsPresence']) {
             $script:PresenceDiagnostic = 'Monitor disattivato nelle impostazioni'
             Commit-Presence -State 'Disabled'
-            return
+            if (-not [bool]$Config['MonitorColleagues']) { return }
         }
 
         Receive-PresenceProbe
@@ -1202,7 +1195,7 @@ function Update-TeamsMonitor {
         }
     } catch {
         $script:PresenceDiagnostic = $_.Exception.Message
-        Write-AppLog ("Monitor Teams: {0}" -f $_.Exception.Message)
+        Write-LocalError -Code 'MONITOR' -Detail $_.Exception.GetType().Name
     }
 }
 
@@ -1230,6 +1223,11 @@ function Update-MascotStatus {
     if (-not $script:IsRunning) {
         $lblMascot.Text = 'KTG IN PAUSA'
         $lblMascot.ForeColor = $ColorMuted
+        return
+    }
+    if (Get-EnginePauseReason) {
+        $lblMascot.Text = 'KTG IN ATTESA'
+        $lblMascot.ForeColor = $ColorYellow
         return
     }
 
@@ -1274,7 +1272,12 @@ function Update-MascotVisibility {
 function Update-Dashboard {
     if ($script:IsRunning) {
         $detail = "Idle: $($script:CurrentIdleSeconds)s  |  soglia: $($Config['IdleThresholdSeconds'])s"
-        Set-RowState -Row $rowEngine -Value 'PROTEZIONE ATTIVA' -Detail $detail -Color $ColorGreen
+        $pauseReason = Get-EnginePauseReason
+        if ($pauseReason) {
+            Set-RowState -Row $rowEngine -Value 'IN ATTESA' -Detail $pauseReason -Color $ColorYellow
+        } else {
+            Set-RowState -Row $rowEngine -Value 'PROTEZIONE ATTIVA' -Detail $detail -Color $ColorGreen
+        }
     } else {
         Set-RowState -Row $rowEngine -Value 'IN PAUSA' -Detail 'Premi Avvia protezione per iniziare' -Color $ColorGray
     }
@@ -1299,7 +1302,9 @@ function Update-Dashboard {
         default { Set-RowState -Row $rowFocus -Value 'NON APERTO' -Detail 'Nessuna finestra Teams rilevata' -Color $ColorGray }
     }
 
-    if (-not $script:IsRunning) {
+    if ($script:IsRunning -and $pauseReason) {
+        Set-RowState -Row $rowActivity -Value 'SOSPESO' -Detail $pauseReason -Color $ColorYellow
+    } elseif (-not $script:IsRunning) {
         Set-RowState -Row $rowActivity -Value 'FERMO' -Detail 'Nessun movimento automatico' -Color $ColorGray
     } elseif ($script:CurrentIdleSeconds -lt [int]$Config['IdleThresholdSeconds']) {
         $lastText = Get-TimeText $script:LastJitterAt
@@ -1323,6 +1328,7 @@ function Update-Dashboard {
 
 function Start-Engine {
     if ($script:IsRunning) { return }
+    if (-not (Apply-ConfigFromUI)) { return }
     if (-not (Save-SettingsFromUI -ShowConfirmation $false)) {
         [System.Windows.Forms.MessageBox]::Show(
             "La protezione puo partire, ma le impostazioni non sono state salvate.`r`n$($script:LastConfigError)",
@@ -1386,6 +1392,7 @@ function Hide-ControlPanel {
 function Cleanup-Application {
     if ($script:CleanupComplete) { return }
     $script:CleanupComplete = $true
+    try { if ($null -ne $LocalForm) { $LocalForm.Dispose() } } catch { }
     try { $EngineTimer.Stop() } catch { }
     try { $OperationsTimer.Stop() } catch { }
     try { $AlertTimer.Stop() } catch { }
@@ -1411,6 +1418,12 @@ function Exit-Application {
 $EngineTimer.Add_Tick({
     if (-not $script:IsRunning) { return }
     try {
+        $pauseReason = Get-EnginePauseReason
+        if ($pauseReason) {
+            $script:NextJitterAt = $null
+            $script:EngineActivity = $pauseReason
+            return
+        }
         $script:CurrentIdleSeconds = Get-IdleSeconds
         $threshold = [int]$Config['IdleThresholdSeconds']
 
@@ -1437,7 +1450,7 @@ $EngineTimer.Add_Tick({
             Set-Timeline ("Jitter #{0} eseguito" -f $script:JitterCount)
         }
     } catch {
-        Write-AppLog ("Errore motore: {0}" -f $_.Exception.Message)
+        Write-LocalError -Code 'ENGINE' -Detail $_.Exception.GetType().Name
         Show-StatusBanner -Text 'Errore nel motore: controlla il log' -BackColor $ColorRed -DurationMilliseconds 8000
     }
 })
@@ -1448,9 +1461,10 @@ $OperationsTimer.Add_Tick({
             $script:CurrentIdleSeconds = Get-IdleSeconds
         }
         Update-TeamsMonitor
+        Update-LocalOperations
         Update-Dashboard
     } catch {
-        Write-AppLog ("Aggiornamento dashboard fallito: {0}" -f $_.Exception.Message)
+        Write-LocalError -Code 'DASHBOARD' -Detail $_.Exception.GetType().Name
     }
 })
 
@@ -1525,6 +1539,9 @@ $Form.Add_FormClosed({
     Cleanup-Application
     [System.Windows.Forms.Application]::ExitThread()
 })
+
+. ([scriptblock]::Create((Get-AppResourceText 'local/Operations.ps1')))
+Initialize-LocalOperations
 
 $chkAlerts.Enabled = $chkMonitorTeams.Checked
 if ($script:LastConfigError) {

@@ -7,7 +7,7 @@
   <img src="logo.png" alt="KeepTeamsGreen Logo" width="220">
 </p>
 
-**KeepTeamsGreen** e un'applicazione open source per Windows che monitora il tempo di inattivita e, quando serve, genera micro-movimenti del cursore. La versione 2.1.1 aggiunge un pannello in tempo reale per Microsoft Teams, alert sul cambio presenza, una gestione tray piu solida e il mostriciattolo del progetto come widget opzionale.
+**KeepTeamsGreen** e un'applicazione open source per Windows che monitora il tempo di inattivita e, quando serve, genera micro-movimenti del cursore. La versione 2.2.0 aggiunge regole locali, una watchlist contatti, fasce orarie, recupero da Assente e diagnostica.
 
 > [!IMPORTANT]
 > Il tool non modifica la presenza tramite API Microsoft e non promette uno stato che non riesce a verificare. Mantiene attiva la sessione simulando un minimo input del cursore; Teams conserva sempre il controllo finale della presenza.
@@ -33,6 +33,37 @@ Il focus viene individuato dalla finestra Windows in primo piano. La presenza vi
 - **Modalita visibile**: il cursore resta nella nuova posizione.
 - **Modalita stealth**: il cursore torna subito alla posizione originale.
 - **Start e Stop**: disponibili sia dal pannello sia dal menu tray.
+
+## Contatti e regole locali (2.2)
+
+Apri **CONTATTI E REGOLE**, aggiungi una persona e scrivi il nome completo esattamente come appare in Teams. Seleziona:
+
+- `Available`: avvisa alla prima disponibilita confermata e ai successivi ritorni a Disponibile;
+- `Change`: avvisa sui cambi di stato confermati dopo una prima lettura di riferimento;
+- giorni (`Weekdays` = lun-ven, `Weekend` = sab-dom, `Everyday` = tutti) e fascia `HH:mm`;
+- intervallo di controllo (5-300 secondi, default 15) e pausa minima tra gli avvisi della stessa persona (60-3600 secondi, default 120).
+
+Attiva il monitor e premi **SALVA REGOLE**. Il salvataggio di questa finestra e indipendente dalle impostazioni jitter del pannello principale. La watchlist accetta fino a 40 nomi. Le modifiche alle regole azzerano le osservazioni precedenti.
+
+La lettura e **passiva tramite Windows UI Automation**: Teams deve esporre un indicatore accessibile associato al nome, per esempio nella lista chat visibile. Il tool non apre chat, non scorre la lista e non cerca persone automaticamente. I contatti fuori dall'interfaccia caricata, i nomi non riconosciuti, gli indicatori discordanti e i dati scaduti mostrano **Non rilevato**, mai Offline per deduzione. Gli omonimi non sono distinguibili con certezza: usare solo etichette univoche nella propria interfaccia.
+
+Ogni stato richiede due letture coerenti distanziate di almeno 3 secondi. La freschezza scade dopo il maggiore tra 45 secondi e tre intervalli di controllo; una lettura senza indicatore invalida subito lo stato. Le letture scadute non generano avvisi di cambio stato. Gli orari si riferiscono al PC; una fascia notturna e attribuita al giorno in cui inizia, e orari uguali significano 24 ore.
+
+La tabella mostra anche l'ora dell'ultima osservazione. **Controlla ora** anticipa la prossima lettura; **Silenzia contatti 15 min** sospende gli avvisi senza bloccare le letture. Il monitor contatti funziona anche quando il motore jitter e fermo.
+
+## Fasce personali, focus e recupero
+
+In **Orari e recupero** puoi limitare la protezione a giorni e fascia oraria. Premi Avvia nel pannello principale per armare il motore: attende fuori fascia e riprende nella fascia. Stop lo disarma. Il programma deve essere aperto: non crea attivita pianificate in Windows.
+
+Il recupero opzionale esegue un jitter sul passaggio personale confermato **Verde > Assente**, al massimo una volta ogni due minuti, e controlla il ritorno a verde entro 30 secondi. Il risultato indica una nuova osservazione, non una garanzia che il jitter abbia modificato la presenza. Occupato e Non disturbare non vengono modificati. **Porta Teams davanti** permette di recuperare il focus su richiesta; Windows potrebbe non concederlo.
+
+Quando Windows e bloccato o il desktop non e accessibile, il jitter e la lettura vengono sospesi. Allo sblocco si scartano le osservazioni precedenti. Dopo la sospensione del PC i dati troppo vecchi vengono invalidati.
+
+## Diagnostica e dati locali
+
+La scheda **Diagnostica** mostra salute del lettore, ultima lettura, stato del recupero, ultimi 100 eventi in memoria ed errori con codice e contatore. I tentativi falliti applicano un'attesa crescente fino a due minuti. Una lettura UI Automation bloccata non avvia altri worker: dopo 12 secondi viene segnalato il timeout e i dati vecchi non vengono accettati. **Riprova lettura Teams** riparte appena il provider precedente ha terminato; se rimane bloccato e necessario riavviare il tool/Teams.
+
+Il log ruota a 1 MiB conservando una copia precedente. **Esporta diagnostica** salva versione, contatori e codici errore, escludendo nomi e stati dei colleghi, configurazione, percorsi personali e log grezzi. I nomi della watchlist sono salvati nel `config.json` locale, gli stati e gli orari di osservazione restano in memoria e non vengono registrati nel log. Il programma non effettua richieste Graph, login Microsoft, webhook o telemetria. La normale attivita di rete di Teams rimane gestita da Teams.
 
 ## Tray, taskbar e icona
 
@@ -80,6 +111,19 @@ Per creare l'eseguibile standalone con script, logo e icona incorporati serve [.
 ```
 
 La build valida prima la sintassi, incorpora anche `logo.png` per il widget e conserva l'eseguibile precedente come `KeepTeamsGreen.previous.exe`.
+I moduli in `local/` sono incorporati nell'EXE: basta copiare l'eseguibile sul PC Windows. Per l'avvio da sorgente servono anche i file nella cartella `local/`.
+
+Verifica delle regole (eseguibile anche con PowerShell 7 su Linux):
+
+```powershell
+pwsh -NoProfile -File ./tests/Test-LocalRules.ps1
+```
+
+Collaudo dell'interfaccia reale su Windows PowerShell 5.1, con configurazione temporanea isolata:
+
+```powershell
+powershell.exe -NoProfile -STA -File .\tests\Smoke-Windows.ps1
+```
 
 ### Firma digitale e SmartScreen
 
