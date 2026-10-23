@@ -16,18 +16,28 @@ try {
         $LocalForm.Show($Form)
         [System.Windows.Forms.Application]::DoEvents()
         if ($contactGrid.Columns.Count -ne 8) { throw 'Griglia incompleta' }
+        if ($LocalForm.Controls[0].TabPages.Count -ne 5) { throw 'Schede impostazioni mancanti' }
+        $nudMascotScale.Value = 150
+        $nudMascotOpacity.Value = 50
+        if ($MascotForm.Opacity -ne 0.5 -or $MascotForm.ClientSize.Width -ne 264) { throw 'Anteprima widget non applicata' }
         $contactGrid.Rows.Add([object[]]@($true, 'Test Person', 'Available', 'Everyday', '00:00', '00:00', '-', '-')) | Out-Null
         $chkLocalContacts.Checked = $true
         Save-LocalOptions
         if (@($Config['Colleagues']).Count -ne 1) { throw 'Salvataggio contatti non riuscito' }
+        if ($Config['MascotScalePercent'] -ne 150 -or $Config['MascotOpacityPercent'] -ne 50) { throw 'Salvataggio widget non riuscito' }
+        Update-MascotQuickMenu
+        if ($QuickContactItems[0].Text -notlike 'Test Person*') { throw 'Menu rapido contatti non aggiornato' }
         $chkLocalContacts.Checked = $false
         if ($chkLocalContacts.Text -notlike '[[] []]*') { throw 'Toggle non aggiornato' }
         Update-Dashboard
         Update-LocalOperations
+        Show-LocalNotification -Title 'Collaudo popup' -Message 'Notifica di test senza suono.' -Silent
+        [System.Windows.Forms.Application]::DoEvents()
+        if (-not $NotificationForm.Visible -or $notificationTitle.Text -ne 'Collaudo popup') { throw 'Popup locale non visibile' }
         $script:AllowExit = $true
         $LocalForm.Close()
         $Form.Close()
-        Write-Output 'PASS: Windows Forms initialization, toggles, contacts, save, dashboard, close.'
+        Write-Output 'PASS: Windows Forms initialization, toggles, contacts, widget preview, quick menu, save, dashboard, silent popup, close. Audio not tested.'
 '@
     $source = $source.Replace('[System.Windows.Forms.Application]::Run()', $checks)
     $source = $source.Replace('$BaseDir = $PSScriptRoot', ('$BaseDir = ' + "'" + $project.Replace("'", "''") + "'"))

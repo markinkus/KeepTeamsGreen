@@ -20,7 +20,9 @@ Assert-Equal ($presenceRules::State('status Available')) 'Available' 'Teams acco
 Assert-Equal ($presenceRules::NamedState('Profile picture of Mario Rossi, Busy', 'Mario Rossi')) 'Busy' 'Avatar label'
 Assert-Equal ($presenceRules::OwnAccount('Mario Rossi, Available', 'avatar-presence', $true)) $false 'Colleague is not self'
 Assert-Equal ($presenceRules::OwnAccount('Account manager, Available', 'me-control', $true)) $true 'Account control'
-Assert-Equal ($presenceRules::OwnAccount('Account manager', 'me-control', $false)) $false 'Header boundary'
+Assert-Equal ($presenceRules::OwnAccount('Account manager', 'me-control', $false)) $true 'Explicit account ID works with custom DPI/layout'
+Assert-Equal ($presenceRules::OwnAccount('Account manager', '', $false)) $false 'Generic label still needs header boundary'
+Assert-Equal ($presenceRules::OwnAccount('Mario Rossi, Available', 'personButton', $false)) $false 'Generic person buttons outside account header are not self'
 
 # Windows crossing midnight belong to the day on which they started.
 Assert-Equal (Test-LocalWindow ([datetime]'2026-10-23T23:00:00') 'Weekdays' '22:00' '02:00') $true 'Friday night'
@@ -70,7 +72,7 @@ foreach ($scenario in @(
         try {
             [IO.File]::WriteAllText($ConfigPath, $Scenario.Json)
             . ([scriptblock]::Create($Code))
-            Assert-Equal $Config['SchemaVersion'] 5 'Schema migration'
+            Assert-Equal $Config['SchemaVersion'] 6 'Schema migration'
             Assert-Equal $Config['JitterIntervalSecondsMin'] $Scenario.Min 'Min preserved'
             Assert-Equal $Config['JitterIntervalSecondsMax'] $Scenario.Max 'Max preserved'
             $Config['Colleagues'] = @([pscustomobject]@{ Name = 'Test Person'; Rule = 'Change'; Days = 'Weekdays'; From = '22:00'; To = '02:00'; Enabled = $true })
@@ -80,8 +82,63 @@ foreach ($scenario in @(
             Assert-Equal @($Config['Colleagues']).Count 1 'Nested rule reload'
             Assert-Equal $Config['Colleagues'][0].From '22:00' 'Schedule preserved'
             Assert-Equal (Test-Path -LiteralPath $ConfigBackupPath) $true 'Backup exists'
+            Assert-Equal $Config['AutoFocusEnabled'] $false 'Autofocus opt in'
+            Assert-Equal $Config['MascotOpacityPercent'] 96 'Default widget opacity'
+            $Config['AutoFocusEnabled'] = $true
+            $Config['MascotScalePercent'] = 150
+            $Config['NotificationSound'] = 'Nuclear'
+            Assert-Equal (Save-Config) $true 'Interaction settings save'
+            $Config['AutoFocusEnabled'] = $false; $Config['MascotScalePercent'] = 100; $Config['NotificationSound'] = 'System'
+            Load-Config
+            Assert-Equal $Config['AutoFocusEnabled'] $true 'Autofocus reload'
+            Assert-Equal $Config['MascotScalePercent'] 150 'Widget reload'
+            Assert-Equal $Config['NotificationSound'] 'Nuclear' 'Sound reload'
         } finally { [IO.Directory]::Delete($AppDataDir, $true) }
     } $configCode $scenario
 }
 
-Write-Output "PASS: $script:checks checks (presence matching, debounce, freshness, schedules, migrations, storage)."
+$focusConfig = @{ AutoFocusEnabled = $true; AutoFocusTrigger = 'Away'; AutoFocusIdleSeconds = 5; AutoFocusCooldownSeconds = 60 }
+Assert-Equal (Test-AutoFocusDue $focusConfig 'Away' 5 $now $null $false $false) $true 'Autofocus allowed'
+Assert-Equal (Test-AutoFocusDue $focusConfig 'Background' 5 $now $null $false $false) $false 'Other trigger ignored'
+Assert-Equal (Test-AutoFocusDue $focusConfig 'Away' 4 $now $null $false $false) $false 'Typing guard'
+Assert-Equal (Test-AutoFocusDue $focusConfig 'Away' 5 $now $now.AddSeconds(-30) $false $false) $false 'Autofocus cooldown'
+Assert-Equal (Test-AutoFocusDue $focusConfig 'Away' 5 $now $null $true $false) $false 'Manual stop suppresses autofocus'
+Assert-Equal (Test-AutoFocusDue $focusConfig 'Away' 5 $now $null $false $true) $false 'Schedule and desktop gate'
+$focusConfig.AutoFocusTrigger = 'Both'
+Assert-Equal (Test-AutoFocusDue $focusConfig 'Background' 5 $now $null $false $false) $true 'Combined trigger'
+
+$people = @()
+foreach ($name in @('A Person', 'B Person', 'C Person', 'D Person')) {
+    $people += [pscustomobject]@{ Name = $name; Enabled = $true; Days = 'Everyday'; From = '00:00'; To = '00:00' }
+}
+$people[0].Enabled = $false
+$runtimeMap = @{ 'B Person' = @{ State = 'Available'; LastSeen = $now.AddSeconds(-10) }; 'C Person' = @{ State = 'Busy'; LastSeen = $now.AddSeconds(-60) } }
+$quick = @(Get-QuickContacts $people $runtimeMap $now $true $true 45)
+Assert-Equal $quick.Count 3 'Only three active contacts'
+Assert-Equal $quick[0].Name 'B Person' 'Saved order and disabled skip'
+Assert-Equal $quick[0].State 'Available' 'Fresh contact in widget'
+Assert-Equal $quick[1].State 'Unknown' 'Stale contact in widget'
+$quick = @(Get-QuickContacts $people $runtimeMap $now $false $true 45)
+Assert-Equal $quick[0].State 'Unknown' 'Monitor disabled in widget'
+$quick = @(Get-QuickContacts $people $runtimeMap $now $true $false 45)
+Assert-Equal $quick[0].State 'Unknown' 'Teams missing in widget'
+foreach ($scale in @(60, 100, 200)) {
+    $layout = Get-MascotLayout $scale
+    Assert-Equal ($layout.Margin + $layout.StatusWidth + $layout.ArrowWidth -le $layout.Width) $true 'Arrow inside widget'
+    Assert-Equal ($layout.StatusY + $layout.StatusHeight -le $layout.Height) $true 'Status inside widget'
+}
+
+$audioNamespace = 'KtgAudio' + [guid]::NewGuid().ToString('N')
+$audio = Add-Type -TypeDefinition ("namespace $audioNamespace {" + [Environment]::NewLine + [IO.File]::ReadAllText((Join-Path $project 'local/NotificationAudio.cs')) + [Environment]::NewLine + '}') -PassThru | Where-Object Name -EQ 'NotificationAudio'
+Assert-Equal ($audio::CreateWave('Silent', 60).Length) 0 'Silent sound'
+foreach ($profile in @('Alarm', 'Siren', 'Nuclear')) {
+    $wave = $audio::CreateWave($profile, 60)
+    Assert-Equal ([Text.Encoding]::ASCII.GetString($wave, 0, 4)) 'RIFF' 'WAV header'
+    Assert-Equal ([BitConverter]::ToInt32($wave, 4)) ($wave.Length - 8) 'RIFF length'
+    Assert-Equal ([BitConverter]::ToInt32($wave, 40)) ($wave.Length - 44) 'PCM data length'
+    Assert-Equal ([BitConverter]::ToInt32($wave, 24)) 24000 'Sample rate'
+}
+$silentWave = $audio::CreateWave('Alarm', 0)
+Assert-Equal (@($silentWave[44..($silentWave.Length - 1)] | Where-Object { $_ -ne 0 }).Count) 0 'Zero volume PCM'
+
+Write-Output "PASS: $script:checks checks (presence, schedules, storage, autofocus, widget, synthesized audio)."

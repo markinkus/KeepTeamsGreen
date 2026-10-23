@@ -15,7 +15,7 @@ $outputPath = Join-Path $projectDir 'KeepTeamsGreen.exe'
 $nextOutputPath = Join-Path $projectDir 'KeepTeamsGreen.next.exe'
 $backupPath = Join-Path $projectDir 'KeepTeamsGreen.previous.exe'
 $launcherProject = Join-Path $projectDir 'launcher\KeepTeamsGreen.Launcher.csproj'
-$localFiles = @('local/Rules.ps1', 'local/Operations.ps1', 'local/PresenceText.cs', 'local/PresenceReader.cs')
+$localFiles = @('local/Rules.ps1', 'local/Operations.ps1', 'local/Interactions.ps1', 'local/PresenceText.cs', 'local/PresenceReader.cs', 'local/NotificationAudio.cs')
 
 foreach ($requiredPath in @($scriptPath, $logoPath, $iconPath, $launcherProject)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -37,12 +37,14 @@ if ($parseErrors.Count -gt 0) {
     $details = ($parseErrors | ForEach-Object { "riga $($_.Extent.StartLineNumber): $($_.Message)" }) -join [Environment]::NewLine
     throw "Il sorgente contiene errori di sintassi:$([Environment]::NewLine)$details"
 }
-foreach ($relativePath in @('local/Rules.ps1', 'local/Operations.ps1')) {
+foreach ($relativePath in @('local/Rules.ps1', 'local/Operations.ps1', 'local/Interactions.ps1')) {
     $moduleTokens = $null; $moduleErrors = $null
     [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $projectDir $relativePath), [ref]$moduleTokens, [ref]$moduleErrors) | Out-Null
     if ($moduleErrors.Count -gt 0) { throw "Errori di sintassi in $relativePath : $($moduleErrors[0].Message)" }
 }
 & (Join-Path $projectDir 'tests/Test-LocalRules.ps1')
+& (Join-Path $projectDir 'tests/Test-Interactions.ps1')
+& (Join-Path $projectDir 'tests/Test-PresencePipeline.ps1')
 
 $dotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
 if ($null -eq $dotnetCommand) {

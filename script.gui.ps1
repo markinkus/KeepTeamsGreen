@@ -15,7 +15,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 
 $AppName = 'KeepTeamsGreen'
-$AppVersion = '2.2.0'
+$AppVersion = '2.3.1'
 $AppDataDir = Join-Path $env:APPDATA $AppName
 $LogPath = Join-Path $AppDataDir 'last_run.log'
 $ConfigPath = Join-Path $AppDataDir 'config.json'
@@ -185,6 +185,24 @@ public static class Win32Window {
     private static extern bool ShowWindow(IntPtr handle, int command);
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr handle);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr handle, out RECT rect);
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr handle, ref Win32Cursor.POINT point);
+
+    public static bool IsForeground(IntPtr handle) { return GetForegroundWindow() == handle; }
+
+    public static RECT ClientBounds(IntPtr handle) {
+        RECT rect;
+        if (IsIconic(handle) || !GetClientRect(handle, out rect)) return new RECT();
+        Win32Cursor.POINT point = new Win32Cursor.POINT();
+        if (!ClientToScreen(handle, ref point)) return new RECT();
+        rect.Right += point.X; rect.Bottom += point.Y;
+        rect.Left += point.X; rect.Top += point.Y;
+        return rect;
+    }
 
     public static bool IsDesktopUnlocked() {
         IntPtr desktop = OpenInputDesktop(0, false, 0x0100);
@@ -240,8 +258,21 @@ public static class Win32Window {
         return windows.ToArray();
     }
 }
+public class PassiveOverlayForm : System.Windows.Forms.Form {
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override System.Windows.Forms.CreateParams CreateParams {
+        get {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000 | 0x00000080;
+            return cp;
+        }
+    }
+}
 "@
-Add-Type -TypeDefinition $win32Source
+Add-Type -TypeDefinition $win32Source -ReferencedAssemblies @([object].Assembly.Location, [Diagnostics.Process].Assembly.Location, [System.Windows.Forms.Form].Assembly.Location, [System.Drawing.Point].Assembly.Location)
+if ($null -eq ('NotificationAudio' -as [type])) {
+    Add-Type -TypeDefinition (Get-AppResourceText 'local/NotificationAudio.cs')
+}
 
 $script:UIAutomationAvailable = $false
 $presenceProbeSource = (Get-AppResourceText 'local/PresenceText.cs') + [Environment]::NewLine + (Get-AppResourceText 'local/PresenceReader.cs')
@@ -251,6 +282,9 @@ try {
     Add-Type -AssemblyName UIAutomationTypes
     Add-Type -AssemblyName WindowsBase
     $uiaReferences = @(
+        [object].Assembly.Location,
+        [Diagnostics.Process].Assembly.Location,
+        [System.Linq.Enumerable].Assembly.Location,
         [System.Windows.Automation.AutomationElement].Assembly.Location,
         [System.Windows.Automation.AutomationIdentifier].Assembly.Location,
         [System.Windows.Rect].Assembly.Location
@@ -264,7 +298,7 @@ try {
 }
 
 $ConfigDefaults = [ordered]@{
-    SchemaVersion               = 5
+    SchemaVersion               = 6
     IdleThresholdSeconds        = 120
     JitterIntervalSecondsMin    = 3
     JitterIntervalSecondsMax    = 3
@@ -283,6 +317,16 @@ $ConfigDefaults = [ordered]@{
     ScheduleFrom                = '09:00'
     ScheduleTo                  = '18:00'
     RecoverAway                 = $false
+    AutoFocusEnabled            = $false
+    AutoFocusTrigger            = 'Away'
+    AutoFocusIdleSeconds        = 5
+    AutoFocusCooldownSeconds    = 60
+    AutoFocusMovePointer        = $true
+    AutoFocusStartJitter        = $true
+    MascotScalePercent          = 100
+    MascotOpacityPercent        = 96
+    NotificationSound           = 'System'
+    NotificationVolumePercent   = 60
 }
 
 $Config = [ordered]@{}
@@ -324,7 +368,7 @@ function Convert-ToBoolean {
 }
 
 function Normalize-Config {
-    $Config['SchemaVersion'] = 5
+    $Config['SchemaVersion'] = 6
     $Config['IdleThresholdSeconds'] = Convert-ToBoundedInt -Value $Config['IdleThresholdSeconds'] -Default 120 -Minimum 5 -Maximum 3600
     $Config['JitterIntervalSecondsMin'] = Convert-ToBoundedInt -Value $Config['JitterIntervalSecondsMin'] -Default 3 -Minimum 1 -Maximum 600
     $Config['JitterIntervalSecondsMax'] = Convert-ToBoundedInt -Value $Config['JitterIntervalSecondsMax'] -Default 3 -Minimum 1 -Maximum 600
@@ -342,6 +386,16 @@ function Normalize-Config {
     $Config['MonitorColleagues'] = Convert-ToBoolean $Config['MonitorColleagues'] $false
     $Config['ScheduleEnabled'] = Convert-ToBoolean $Config['ScheduleEnabled'] $false
     $Config['RecoverAway'] = Convert-ToBoolean $Config['RecoverAway'] $false
+    $Config['AutoFocusEnabled'] = Convert-ToBoolean $Config['AutoFocusEnabled'] $false
+    $Config['AutoFocusMovePointer'] = Convert-ToBoolean $Config['AutoFocusMovePointer'] $true
+    $Config['AutoFocusStartJitter'] = Convert-ToBoolean $Config['AutoFocusStartJitter'] $true
+    if ($Config['AutoFocusTrigger'] -notin @('Away', 'Background', 'Both')) { $Config['AutoFocusTrigger'] = 'Away' }
+    $Config['AutoFocusIdleSeconds'] = Convert-ToBoundedInt -Value $Config['AutoFocusIdleSeconds'] -Default 5 -Minimum 1 -Maximum 120
+    $Config['AutoFocusCooldownSeconds'] = Convert-ToBoundedInt -Value $Config['AutoFocusCooldownSeconds'] -Default 60 -Minimum 15 -Maximum 3600
+    $Config['MascotScalePercent'] = Convert-ToBoundedInt -Value $Config['MascotScalePercent'] -Default 100 -Minimum 60 -Maximum 200
+    $Config['MascotOpacityPercent'] = Convert-ToBoundedInt -Value $Config['MascotOpacityPercent'] -Default 96 -Minimum 25 -Maximum 100
+    if ($Config['NotificationSound'] -notin @('System', 'Alarm', 'Siren', 'Nuclear', 'Silent')) { $Config['NotificationSound'] = 'System' }
+    $Config['NotificationVolumePercent'] = Convert-ToBoundedInt -Value $Config['NotificationVolumePercent'] -Default 60 -Minimum 0 -Maximum 100
     $Config['ColleagueScanSeconds'] = Convert-ToBoundedInt -Value $Config['ColleagueScanSeconds'] -Default 15 -Minimum 5 -Maximum 300
     $Config['ColleagueCooldownSeconds'] = Convert-ToBoundedInt -Value $Config['ColleagueCooldownSeconds'] -Default 120 -Minimum 60 -Maximum 3600
     if ($Config['ScheduleDays'] -notin @('Everyday', 'Weekdays', 'Weekend')) { $Config['ScheduleDays'] = 'Weekdays' }
@@ -812,7 +866,7 @@ $trayMenu.Items.Add('-') | Out-Null
 $miExit = $trayMenu.Items.Add('Esci')
 $Notify.ContextMenuStrip = $trayMenu
 
-$MascotForm = New-Object System.Windows.Forms.Form
+$MascotForm = New-Object PassiveOverlayForm
 $MascotForm.Text = 'KeepTeamsGreen Monster'
 $MascotForm.ClientSize = New-Object System.Drawing.Size -ArgumentList 148, 164
 $MascotForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
@@ -830,7 +884,7 @@ $mascotPicture.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
 $mascotPicture.BackColor = [System.Drawing.Color]::Transparent
 if ($null -ne $script:LogoImage) { $mascotPicture.Image = $script:LogoImage }
 
-$lblMascot = New-Label -Text 'KTG ATTIVO' -X 8 -Y 134 -Width 132 -Height 24 -Size 8 -Style ([System.Drawing.FontStyle]::Bold) -Color $ColorGreen
+$lblMascot = New-Label -Text 'STATO NON LETTO' -X 8 -Y 134 -Width 132 -Height 24 -Size 8 -Style ([System.Drawing.FontStyle]::Bold) -Color $ColorYellow
 $lblMascot.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $lblMascot.BackColor = $ColorCardAlt
 $MascotForm.Controls.AddRange(@($mascotPicture, $lblMascot))
@@ -856,10 +910,16 @@ $script:TeamsFocusState = 'Closed'
 $script:CommittedPresence = 'Unknown'
 $script:PendingPresence = $null
 $script:PendingPresenceSince = $null
+$script:LastReliablePresence = $null
+$script:LastReliablePresenceAt = $null
 $script:PresenceDiagnostic = 'In attesa del primo controllo'
 $script:PresenceTask = $null
 $script:PresenceTaskHandle = [IntPtr]::Zero
 $script:PresenceTaskStartedAt = $null
+$script:ContactTask = $null
+$script:ContactTaskHandle = [IntPtr]::Zero
+$script:ContactTaskStartedAt = $null
+$script:ContactTaskGeneration = 0
 $script:LastPresenceReadAt = $null
 $script:ProbeFailureCount = 0
 $script:NextPresenceProbeAt = Get-Date
@@ -1011,15 +1071,7 @@ function Show-PresenceDropAlert {
     $message = "Teams non e piu verde. Stato rilevato: $display."
     Set-Timeline $message
     Show-StatusBanner -Text $message -BackColor $ColorRed -DurationMilliseconds 10000
-    try { [System.Media.SystemSounds]::Exclamation.Play() } catch { }
-    try {
-        $Notify.ShowBalloonTip(
-            7000,
-            'KeepTeamsGreen - Cambio stato Teams',
-            $message,
-            [System.Windows.Forms.ToolTipIcon]::Warning
-        )
-    } catch { }
+    Show-LocalNotification -Title 'Cambio stato Teams' -Message $message
     Write-AppLog ("ALERT: presenza Teams Available -> {0}" -f $NewState)
 }
 
@@ -1027,45 +1079,44 @@ function Commit-Presence {
     param([string]$State)
 
     if ([string]::IsNullOrWhiteSpace($State)) { $State = 'Unknown' }
-    if ($State -eq $script:CommittedPresence) {
-        $script:PendingPresence = $null
-        $script:PendingPresenceSince = $null
-        return
-    }
-
+    $now = Get-Date
     if ($State -in @('Disabled', 'Unknown')) {
-        $previous = $script:CommittedPresence
+        if ($State -eq 'Disabled') {
+            $script:LastReliablePresence = $null
+            $script:LastReliablePresenceAt = $null
+        }
+        $changed = $State -ne $script:CommittedPresence
         $script:CommittedPresence = $State
         $script:PendingPresence = $null
         $script:PendingPresenceSince = $null
-        Set-Timeline (Get-PresenceDisplayName $State)
+        if ($changed) { Set-Timeline (Get-PresenceDisplayName $State) }
         return
     }
 
-    $now = Get-Date
+    # A brief unavailable UIA read is not a new baseline. Keep the last reliable
+    # state for at most 20s, but always display Unknown while data is missing.
+    $previous = $script:LastReliablePresence
+    if ($null -eq $script:LastReliablePresenceAt -or ($now - $script:LastReliablePresenceAt).TotalSeconds -gt 20) { $previous = $null }
+    if ($State -eq $previous) {
+        $script:CommittedPresence = $State
+        $script:LastReliablePresenceAt = $now
+        $script:PendingPresence = $null
+        $script:PendingPresenceSince = $null
+        return
+    }
+
     if ($State -ne $script:PendingPresence) {
         $script:PendingPresence = $State
         $script:PendingPresenceSince = $now
-
-        # The first reliable reading is safe to expose immediately. A drop from
-        # green is confirmed by a second reading (or a few seconds of closure).
-        if ($script:CommittedPresence -ne 'Available') {
-            $oldState = $script:CommittedPresence
-            $script:CommittedPresence = $State
-            $script:LastPresenceChangeAt = $now
-            Set-Timeline ("Stato Teams: {0}" -f (Get-PresenceDisplayName $State))
-            Write-AppLog ("Presenza Teams: {0} -> {1}" -f $oldState, $State)
-        }
-        return
+        if ($previous -eq 'Available') { return }
     }
 
-    $minimumSeconds = if ($State -eq 'Closed') { 5 } else { 4 }
-    if (($now - $script:PendingPresenceSince).TotalSeconds -lt $minimumSeconds) {
-        return
-    }
+    $minimumSeconds = if ($State -eq 'Closed') { 5 } else { 2 }
+    if ($previous -eq 'Available' -and ($now - $script:PendingPresenceSince).TotalSeconds -lt $minimumSeconds) { return }
 
-    $previous = $script:CommittedPresence
     $script:CommittedPresence = $State
+    $script:LastReliablePresence = $State
+    $script:LastReliablePresenceAt = $now
     $script:PendingPresence = $null
     $script:PendingPresenceSince = $null
     $script:LastPresenceChangeAt = $now
@@ -1075,7 +1126,8 @@ function Commit-Presence {
     if ($previous -eq 'Available' -and $State -notin @('Available', 'Unknown', 'Disabled') -and [bool]$Config['AlertOnPresenceDrop']) {
         Show-PresenceDropAlert -NewState $State
     }
-    if ($previous -eq 'Available' -and $State -eq 'Away') { Invoke-AwayRecovery }
+    if ($State -eq 'Away') { Request-TeamsAutoFocus -Reason 'Away' }
+    if ($previous -eq 'Available' -and $State -eq 'Away' -and -not [bool]$Config['AutoFocusEnabled']) { Invoke-AwayRecovery }
 }
 
 function Start-PresenceProbe {
@@ -1090,11 +1142,10 @@ function Start-PresenceProbe {
 
     try {
         $script:PresenceTaskHandle = $WindowHandle
-        $script:ProbeContactNames = @(Get-DueContactNames)
         $script:ProbeGeneration = $script:LocalGeneration
         $script:PresenceTaskStartedAt = Get-Date
-        $script:PresenceTask = [KeepTeamsGreenMonitoring.TeamsPresenceProbe]::BeginInspect($WindowHandle, [string[]]$script:ProbeContactNames)
-        $script:NextPresenceProbeAt = (Get-Date).AddSeconds(6)
+        $script:PresenceTask = [KeepTeamsGreenMonitoring.TeamsPresenceProbe]::BeginInspect($WindowHandle, [string[]]@())
+        $script:NextPresenceProbeAt = (Get-Date).AddSeconds(2)
     } catch {
         $script:PresenceDiagnostic = $_.Exception.Message
         $script:PresenceTask = $null
@@ -1126,8 +1177,10 @@ function Receive-PresenceProbe {
                 $script:PresenceDiagnostic = [string]$result.Diagnostic
                 if (((Get-Date) - $script:PresenceTaskStartedAt).TotalSeconds -le 12 -and $script:ProbeGeneration -eq $script:LocalGeneration) {
                     $script:LastPresenceReadAt = Get-Date
-                    if ([bool]$Config['MonitorTeamsPresence']) { Commit-Presence -State ([string]$result.State) }
-                    Receive-ContactReadings $result.Contacts
+                    if ([bool]$Config['MonitorTeamsPresence']) {
+                        Commit-Presence -State ([string]$result.State)
+                        Observe-AutoFocusPresence ([string]$result.State)
+                    }
                     Complete-AwayRecovery ([string]$result.State)
                     if ($result.Diagnostic -like 'Lettura accessibilita fallita*') {
                         $script:ProbeFailureCount = [Math]::Min(5, $script:ProbeFailureCount + 1)
@@ -1153,6 +1206,36 @@ function Receive-PresenceProbe {
     }
 }
 
+function Update-ContactProbe {
+    # A slow colleague tree must never delay or overwrite the personal reader.
+    if ($null -ne $script:ContactTask) {
+        if (-not $script:ContactTask.IsCompleted) {
+            if (((Get-Date) - $script:ContactTaskStartedAt).TotalSeconds -gt 12) {
+                Write-LocalError 'UIA_CONTACT_TIMEOUT' 'Provider contatti occupato; nessun worker duplicato'
+            }
+            return
+        }
+        try {
+            if ($script:ContactTask.IsFaulted) { Write-LocalError 'UIA_CONTACT_READ' 'Lettura contatti fallita' }
+            elseif ($script:ContactTaskGeneration -eq $script:LocalGeneration -and $null -ne $script:TeamsWindow -and
+                $script:ContactTaskHandle -eq $script:TeamsWindow.Handle -and
+                ((Get-Date) - $script:ContactTaskStartedAt).TotalSeconds -le 12) {
+                Receive-ContactReadings $script:ContactTask.Result.Contacts
+            }
+        } catch { Write-LocalError 'UIA_CONTACT_READ' $_.Exception.GetType().Name }
+        finally { $script:ContactTask = $null }
+    }
+    if (-not $script:UIAutomationAvailable) { return }
+    $names = @(Get-DueContactNames)
+    if ($names.Count -eq 0) { return }
+    try {
+        $script:ContactTaskHandle = $script:TeamsWindow.Handle
+        $script:ContactTaskGeneration = $script:LocalGeneration
+        $script:ContactTaskStartedAt = Get-Date
+        $script:ContactTask = [KeepTeamsGreenMonitoring.TeamsPresenceProbe]::BeginInspectContacts($script:TeamsWindow.Handle, [string[]]$names)
+    } catch { Write-LocalError 'UIA_CONTACT_START' $_.Exception.GetType().Name }
+}
+
 function Update-TeamsMonitor {
     try {
         if (-not [Win32Window]::IsDesktopUnlocked()) {
@@ -1160,7 +1243,15 @@ function Update-TeamsMonitor {
             Commit-Presence -State 'Unknown'
             return
         }
+        $oldHandle = if ($null -ne $script:TeamsWindow) { $script:TeamsWindow.Handle } else { [IntPtr]::Zero }
         $script:TeamsWindow = Get-TeamsWindow
+        if ($null -ne $script:TeamsWindow -and $oldHandle -ne $script:TeamsWindow.Handle) {
+            $script:LastReliablePresence = $null
+            $script:LastReliablePresenceAt = $null
+            $script:LastPresenceReadAt = $null
+            $script:NextPresenceProbeAt = Get-Date
+            Commit-Presence 'Unknown'
+        }
         $foreground = [Win32Window]::GetForegroundSnapshot()
 
         if ($null -eq $script:TeamsWindow) {
@@ -1189,10 +1280,11 @@ function Update-TeamsMonitor {
             if (-not [bool]$Config['MonitorColleagues']) { return }
         }
 
-        Receive-PresenceProbe
-        if ($null -eq $script:PresenceTask -and (Get-Date) -ge $script:NextPresenceProbeAt) {
+        if ([bool]$Config['MonitorTeamsPresence']) { Receive-PresenceProbe }
+        if ([bool]$Config['MonitorTeamsPresence'] -and $null -eq $script:PresenceTask -and (Get-Date) -ge $script:NextPresenceProbeAt) {
             Start-PresenceProbe -WindowHandle $script:TeamsWindow.Handle
         }
+        Update-ContactProbe
     } catch {
         $script:PresenceDiagnostic = $_.Exception.Message
         Write-LocalError -Code 'MONITOR' -Detail $_.Exception.GetType().Name
@@ -1241,8 +1333,8 @@ function Update-MascotStatus {
             $lblMascot.ForeColor = $ColorRed
         }
         default {
-            $lblMascot.Text = 'KTG ATTIVO'
-            $lblMascot.ForeColor = $ColorGreen
+            $lblMascot.Text = if ($script:CommittedPresence -eq 'Disabled') { 'MONITOR SPENTO' } else { 'STATO NON LETTO' }
+            $lblMascot.ForeColor = $ColorYellow
         }
     }
 }
@@ -1252,6 +1344,7 @@ function Show-Mascot {
         return
     }
     if (-not $MascotForm.Visible) {
+        Update-MascotAppearance -Scale $Config['MascotScalePercent'] -Opacity $Config['MascotOpacityPercent']
         $cursor = Get-CursorPoint
         $screen = [System.Windows.Forms.Screen]::FromPoint($cursor)
         $workingArea = $screen.WorkingArea
@@ -1304,6 +1397,8 @@ function Update-Dashboard {
 
     if ($script:IsRunning -and $pauseReason) {
         Set-RowState -Row $rowActivity -Value 'SOSPESO' -Detail $pauseReason -Color $ColorYellow
+    } elseif ($script:IsRunning -and $script:TeamsJitterHandle -ne [IntPtr]::Zero -and -not [Win32Window]::IsForeground($script:TeamsJitterHandle)) {
+        Set-RowState -Row $rowActivity -Value 'ATTESA TEAMS' -Detail 'Jitter limitato a Teams; riprendi il focus per continuare' -Color $ColorYellow
     } elseif (-not $script:IsRunning) {
         Set-RowState -Row $rowActivity -Value 'FERMO' -Detail 'Nessun movimento automatico' -Color $ColorGray
     } elseif ($script:CurrentIdleSeconds -lt [int]$Config['IdleThresholdSeconds']) {
@@ -1315,11 +1410,12 @@ function Update-Dashboard {
     }
 
     $btnStart.Enabled = -not $script:IsRunning
-    $btnStop.Enabled = $script:IsRunning
-    $btnStop.BackColor = if ($script:IsRunning) { $ColorRed } else { $ColorCardAlt }
-    $btnStop.ForeColor = if ($script:IsRunning) { $ColorText } else { $ColorMuted }
+    $canStop = $script:IsRunning -or ([bool]$Config['AutoFocusEnabled'] -and -not $script:AutoFocusSuppressed)
+    $btnStop.Enabled = $canStop
+    $btnStop.BackColor = if ($canStop) { $ColorRed } else { $ColorCardAlt }
+    $btnStop.ForeColor = if ($canStop) { $ColorText } else { $ColorMuted }
     $miStart.Enabled = -not $script:IsRunning
-    $miStop.Enabled = $script:IsRunning
+    $miStop.Enabled = $canStop
     $miStatus.Text = if ($script:IsRunning) { 'Stato: protezione attiva' } else { 'Stato: in pausa' }
     $notificationText = if ($script:IsRunning) { 'KeepTeamsGreen - Protezione attiva' } else { 'KeepTeamsGreen - In pausa' }
     Set-NotifyText -Text $notificationText
@@ -1327,9 +1423,10 @@ function Update-Dashboard {
 }
 
 function Start-Engine {
+    param([switch]$UseSavedConfig)
     if ($script:IsRunning) { return }
-    if (-not (Apply-ConfigFromUI)) { return }
-    if (-not (Save-SettingsFromUI -ShowConfirmation $false)) {
+    if (-not $UseSavedConfig -and -not (Apply-ConfigFromUI)) { return }
+    if (-not $UseSavedConfig -and -not (Save-SettingsFromUI -ShowConfirmation $false)) {
         [System.Windows.Forms.MessageBox]::Show(
             "La protezione puo partire, ma le impostazioni non sono state salvate.`r`n$($script:LastConfigError)",
             'KeepTeamsGreen',
@@ -1339,6 +1436,7 @@ function Start-Engine {
     }
 
     $script:IsRunning = $true
+    $script:AutoFocusSuppressed = $false
     $script:NextJitterAt = $null
     $script:EngineActivity = 'In ascolto'
     $script:MascotDismissed = $false
@@ -1351,7 +1449,11 @@ function Start-Engine {
 }
 
 function Stop-Engine {
-    if (-not $script:IsRunning) { return }
+    $script:AutoFocusSuppressed = $true
+    $script:TeamsJitterHandle = [IntPtr]::Zero
+    $script:AutoFocusRequest = $null
+    $script:ManualFocusPending = $false
+    if (-not $script:IsRunning) { Update-Dashboard; return }
     $script:IsRunning = $false
     $script:NextJitterAt = $null
     $script:EngineActivity = 'Inattivo'
@@ -1379,12 +1481,7 @@ function Hide-ControlPanel {
     $Form.ShowInTaskbar = $false
     if ($ShowHint) {
         try {
-            $Notify.ShowBalloonTip(
-                2500,
-                'KeepTeamsGreen',
-                'Il tool continua a funzionare nell area di notifica.',
-                [System.Windows.Forms.ToolTipIcon]::Info
-            )
+            Show-LocalNotification -Title 'KeepTeamsGreen' -Message 'Il tool continua a funzionare nell area di notifica.' -Silent
         } catch { }
     }
 }
@@ -1392,6 +1489,7 @@ function Hide-ControlPanel {
 function Cleanup-Application {
     if ($script:CleanupComplete) { return }
     $script:CleanupComplete = $true
+    try { Close-InteractionResources } catch { }
     try { if ($null -ne $LocalForm) { $LocalForm.Dispose() } } catch { }
     try { $EngineTimer.Stop() } catch { }
     try { $OperationsTimer.Stop() } catch { }
@@ -1432,6 +1530,10 @@ $EngineTimer.Add_Tick({
             $script:EngineActivity = 'Utente attivo'
             return
         }
+        if ($script:TeamsJitterHandle -ne [IntPtr]::Zero -and -not [Win32Window]::IsForeground($script:TeamsJitterHandle)) {
+            $script:NextJitterAt = $null
+            return
+        }
 
         if ($null -eq $script:NextJitterAt) {
             $waitSeconds = Get-Random -Minimum ([int]$Config['JitterIntervalSecondsMin']) -Maximum ([int]$Config['JitterIntervalSecondsMax'] + 1)
@@ -1441,7 +1543,7 @@ $EngineTimer.Add_Tick({
         }
 
         if ((Get-Date) -ge $script:NextJitterAt) {
-            Invoke-Jitter -Mode ([string]$Config['Mode']) -MaximumPixels ([int]$Config['MaxJitterPixels'])
+            if (-not (Invoke-ScopedJitter)) { $script:NextJitterAt = $null; return }
             $script:LastJitterAt = Get-Date
             $script:JitterCount++
             $waitSeconds = Get-Random -Minimum ([int]$Config['JitterIntervalSecondsMin']) -Maximum ([int]$Config['JitterIntervalSecondsMax'] + 1)
@@ -1541,6 +1643,7 @@ $Form.Add_FormClosed({
 })
 
 . ([scriptblock]::Create((Get-AppResourceText 'local/Operations.ps1')))
+. ([scriptblock]::Create((Get-AppResourceText 'local/Interactions.ps1')))
 Initialize-LocalOperations
 
 $chkAlerts.Enabled = $chkMonitorTeams.Checked
@@ -1561,12 +1664,7 @@ if ([bool]$Config['StartMinimizedToTray']) {
 }
 
 try {
-    $Notify.ShowBalloonTip(
-        2500,
-        'KeepTeamsGreen',
-        'Centrale operativa pronta. Avvia la protezione quando vuoi.',
-        [System.Windows.Forms.ToolTipIcon]::Info
-    )
+    Show-LocalNotification -Title 'KeepTeamsGreen' -Message 'Centrale operativa pronta. Avvia la protezione quando vuoi.' -Silent
 } catch { }
 
 try {

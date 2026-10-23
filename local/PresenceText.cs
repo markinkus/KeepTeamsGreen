@@ -4,12 +4,11 @@ using System.Text.RegularExpressions;
 // Pure matching rules: never derive presence from message bodies or substrings.
 public static class PresenceText {
     public static bool OwnAccount(string name, string id, bool header) {
-        if (!header) return false;
         string accountId = (id ?? "").ToLowerInvariant();
         string label = (name ?? "").ToLowerInvariant();
         return accountId.Contains("me-control") || accountId.Contains("mectrl") || accountId.Contains("mecontrol") ||
-            accountId.Contains("account-manager") || accountId.Contains("personbutton") ||
-            label.Contains("account manager") || label.Contains("gestione account");
+            accountId.Contains("account-manager") ||
+            (header && (accountId.Contains("personbutton") || label.Contains("account manager") || label.Contains("gestione account")));
     }
 
     public static string Clean(string value) {

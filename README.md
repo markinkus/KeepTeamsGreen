@@ -7,7 +7,7 @@
   <img src="logo.png" alt="KeepTeamsGreen Logo" width="220">
 </p>
 
-**KeepTeamsGreen** e un'applicazione open source per Windows che monitora il tempo di inattivita e, quando serve, genera micro-movimenti del cursore. La versione 2.2.0 aggiunge regole locali, una watchlist contatti, fasce orarie, recupero da Assente e diagnostica.
+**KeepTeamsGreen** e un'applicazione open source per Windows che monitora il tempo di inattivita e, quando serve, genera micro-movimenti del cursore. La versione 2.3.1 corregge regressioni del lettore personale e della catena di avviso, mantenendo autofocus configurabile, jitter limitato a Teams, widget ridimensionabile con menu contatti e suoni selezionabili.
 
 > [!IMPORTANT]
 > Il tool non modifica la presenza tramite API Microsoft e non promette uno stato che non riesce a verificare. Mantiene attiva la sessione simulando un minimo input del cursore; Teams conserva sempre il controllo finale della presenza.
@@ -20,10 +20,12 @@ Il nuovo pannello mostra in tempo reale:
 - stato presenza esposto da Teams: Disponibile, Assente, Occupato, Non disturbare o Offline;
 - presenza o meno del focus sulla finestra di Teams;
 - tempo di inattivita, prossimo jitter, ultimo intervento e numero di interventi;
-- alert visivo, sonoro e nell'area di notifica quando uno stato verde confermato cambia;
+- alert con popup locale e suono configurabile quando uno stato verde confermato cambia;
 - stato esplicito `Non rilevato` quando Teams non rende disponibile un dato affidabile.
 
 Il focus viene individuato dalla finestra Windows in primo piano. La presenza viene letta tramite **Windows UI Automation**, cioe dai controlli accessibili esposti dall'interfaccia di Teams. Questo approccio non usa credenziali, token o traffico di rete.
+
+Il controllo personale viene richiesto ogni 2 secondi, separatamente dalla scansione contatti. Dopo aver individuato il controllo account ne aggiorna le proprieta, senza ripercorrere tutta la chat. Una scansione contatti lenta o incompleta non annulla una lettura personale valida. La frequenza richiesta non garantisce i tempi di risposta del provider Windows/Teams. L'uscita dal verde richiede conferma per almeno 2 secondi (5 se la finestra viene chiusa); un breve dato mancante resta visibile come Non rilevato ma conserva il riferimento precedente per massimo 20 secondi per non perdere l'avviso successivo. Dati piu vecchi diventano una nuova lettura iniziale, senza inventare transizioni.
 
 ## Funzioni principali preservate
 
@@ -47,6 +49,8 @@ Attiva il monitor e premi **SALVA REGOLE**. Il salvataggio di questa finestra e 
 
 La lettura e **passiva tramite Windows UI Automation**: Teams deve esporre un indicatore accessibile associato al nome, per esempio nella lista chat visibile. Il tool non apre chat, non scorre la lista e non cerca persone automaticamente. I contatti fuori dall'interfaccia caricata, i nomi non riconosciuti, gli indicatori discordanti e i dati scaduti mostrano **Non rilevato**, mai Offline per deduzione. Gli omonimi non sono distinguibili con certezza: usare solo etichette univoche nella propria interfaccia.
 
+**Non e un monitor contatti garantito in background.** Se la tua versione di Teams espone la presenza solo nella scheda aperta, il tool puo leggerla solo li. La correzione 2.3.1 riconosce anche indicatori annidati nella riga/avatar, quando esposti, ma non rende disponibili dati che Teams non pubblica nell'albero accessibile.
+
 Ogni stato richiede due letture coerenti distanziate di almeno 3 secondi. La freschezza scade dopo il maggiore tra 45 secondi e tre intervalli di controllo; una lettura senza indicatore invalida subito lo stato. Le letture scadute non generano avvisi di cambio stato. Gli orari si riferiscono al PC; una fascia notturna e attribuita al giorno in cui inizia, e orari uguali significano 24 ore.
 
 La tabella mostra anche l'ora dell'ultima osservazione. **Controlla ora** anticipa la prossima lettura; **Silenzia contatti 15 min** sospende gli avvisi senza bloccare le letture. Il monitor contatti funziona anche quando il motore jitter e fermo.
@@ -56,6 +60,16 @@ La tabella mostra anche l'ora dell'ultima osservazione. **Controlla ora** antici
 In **Orari e recupero** puoi limitare la protezione a giorni e fascia oraria. Premi Avvia nel pannello principale per armare il motore: attende fuori fascia e riprende nella fascia. Stop lo disarma. Il programma deve essere aperto: non crea attivita pianificate in Windows.
 
 Il recupero opzionale esegue un jitter sul passaggio personale confermato **Verde > Assente**, al massimo una volta ogni due minuti, e controlla il ritorno a verde entro 30 secondi. Il risultato indica una nuova osservazione, non una garanzia che il jitter abbia modificato la presenza. Occupato e Non disturbare non vengono modificati. **Porta Teams davanti** permette di recuperare il focus su richiesta; Windows potrebbe non concederlo.
+
+### Autofocus (2.3)
+
+In **CONTATTI E REGOLE > Autofocus** abilita l'autofocus e scegli il trigger: Teams Assente, Teams in background o entrambi. Puoi impostare l'attesa di inattivita prima dell'intervento (default 5 secondi) e la pausa fra interventi (default 60 secondi). Il trigger Assente richiede letture confermate. L'autofocus e disabilitato per impostazione predefinita.
+
+Le azioni indipendenti sono **Sposta il puntatore al centro della finestra Teams** e **Avvia auto-jitter su Teams anche se il motore e fermo**. Prima viene richiesto e verificato il focus; solo se riesce vengono eseguite le altre azioni. Se Windows nega il cambio di finestra, il mouse e il motore non vengono modificati. L'autofocus non effettua clic ne cambia lo stato Teams tramite API.
+
+Con l'avvio jitter selezionato, il primo intervento avviene subito; poi si applicano la soglia di inattivita e il range min/max salvati. I movimenti restano entro l'area client di Teams: se il focus passa altrove o il mouse esce dalla finestra, il jitter attende. Se lo spostamento del mouse e disattivato, occorre che il puntatore sia gia nella finestra per eseguire i movimenti.
+
+**Stop** disarma anche l'autofocus automatico per la sessione; **Avvia**, **Autofocus rapido** o disabilitare e riabilitare l'opzione lo riarmano. Le fasce orarie e il blocco Windows valgono anche per l'autofocus rapido. Il comando rapido non richiede di abilitare il trigger automatico e usa le azioni gia salvate. Quando l'autofocus e abilitato, sostituisce il solo jitter della precedente opzione di recupero, evitando due interventi contemporanei.
 
 Quando Windows e bloccato o il desktop non e accessibile, il jitter e la lettura vengono sospesi. Allo sblocco si scartano le osservazioni precedenti. Dopo la sospensione del PC i dati troppo vecchi vengono invalidati.
 
@@ -80,9 +94,22 @@ Attiva **Mostra il mostriciattolo quando la protezione e attiva** per avere un p
 
 - `GREEN OK` quando Teams espone uno stato Disponibile;
 - `CHECK TEAMS` quando viene rilevato uno stato diverso;
-- `KTG ATTIVO` quando il motore lavora ma la presenza non e verificabile.
+- `STATO NON LETTO` in giallo quando il motore lavora ma la presenza non e verificabile;
+- `MONITOR SPENTO` quando il controllo della presenza e disattivato.
 
 Il widget si puo trascinare, aprire con doppio clic o nascondere dal menu contestuale.
+
+Da **CONTATTI E REGOLE > Widget e suoni** puoi impostare dimensione (60-200%) e opacita (25-100%), con anteprima immediata. Premi **SALVA REGOLE** per conservarle al prossimo avvio.
+
+La freccia accanto allo stato apre un menu sotto il widget con **Autofocus rapido** e gli stati dei primi tre contatti salvati che risultano abilitati nella fascia corrente. L'ordine e quello della watchlist. Gli indicatori scaduti o non leggibili restano `Non rilevato`, come nel pannello. Se il widget si trova a fondo schermo, viene spostato quanto basta per lasciare spazio al menu. Il widget non prende il focus quando appare.
+
+### Suoni degli avvisi
+
+La scheda **Widget e suoni** offre **Sistema Windows**, **Allarme**, **Sirena**, **Allarme nucleare** e **Silenzioso**, con anteprima e pulsante per interrompere gli effetti. Gli effetti sono brevi suoni sintetizzati originali incorporati nel programma: non servono WAV esterni. Il volume configurabile riguarda gli effetti sintetizzati; il suono di sistema usa il volume Windows.
+
+Gli avvisi personali e dei contatti usano un popup locale che non prende il focus e il suono scelto. Questo evita il doppio suono dei balloon Windows; in modalita Silenzioso restano gli avvisi visivi. Avvisi simultanei non sovrappongono gli effetti sonori e gli avvisi dei contatti rispettano lo snooze. La comparsa iniziale del pannello e la riduzione in tray non producono allarmi.
+
+**Prova popup + suono** verifica la catena di notifica senza attendere cambi di Teams, usando il suono e il volume selezionati anche prima del salvataggio. La scheda Diagnostica mostra l'ultima richiesta audio, il silenziamento o gli errori di riproduzione: una richiesta riuscita non conferma che gli altoparlanti abbiano emesso audio. Se il popup fallisce, viene tentato il balloon tray e il suono viene comunque richiesto separatamente. Per una verifica udibile scegli Allarme e volume maggiore di zero; Sistema Windows dipende anche dallo schema suoni di Windows. L'avviso quando premi X rimane volutamente silenzioso.
 
 ## Impostazioni affidabili
 
@@ -117,7 +144,11 @@ Verifica delle regole (eseguibile anche con PowerShell 7 su Linux):
 
 ```powershell
 pwsh -NoProfile -File ./tests/Test-LocalRules.ps1
+pwsh -NoProfile -File ./tests/Test-Interactions.ps1
+pwsh -NoProfile -File ./tests/Test-PresencePipeline.ps1
 ```
+
+Il collaudo della pipeline esegue il lettore reale contro un provider UIA simulato e verifica la macchina degli avvisi, i worker separati e il dispatch audio anche quando il popup fallisce. Non verifica la compatibilita con un'installazione reale di Teams ne l'uscita audio del PC.
 
 Collaudo dell'interfaccia reale su Windows PowerShell 5.1, con configurazione temporanea isolata:
 

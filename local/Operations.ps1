@@ -76,7 +76,7 @@ function Receive-ContactReadings {
             -StaleSeconds ([Math]::Max(45, 3 * [int]$Config['ColleagueScanSeconds'])) -CooldownSeconds ([int]$Config['ColleagueCooldownSeconds'])
         if ($notifyContact -and ($null -eq $script:SnoozeUntil -or $now -ge $script:SnoozeUntil)) {
             $stateText = Get-PresenceDisplayName $runtime.State
-            $Notify.ShowBalloonTip(5000, 'KeepTeamsGreen - Contatto', "$($person.Name): $stateText", [System.Windows.Forms.ToolTipIcon]::Info)
+            Show-LocalNotification -Title 'Contatto disponibile / aggiornato' -Message "$($person.Name): $stateText"
             # Names and contact history stay in RAM, not in application logs.
             Add-LocalEvent 'Contatto' 'Regola contatto soddisfatta (nome omesso)'
         }
@@ -88,7 +88,7 @@ function Invoke-AwayRecovery {
     $now = Get-Date
     if ($null -ne $script:RecoveryLastAttempt -and ($now - $script:RecoveryLastAttempt).TotalMinutes -lt 2) { return }
     try {
-        Invoke-Jitter -Mode ([string]$Config['Mode']) -MaximumPixels ([int]$Config['MaxJitterPixels'])
+        if (-not (Invoke-ScopedJitter)) { return }
         $script:LastJitterAt = $now
         $script:JitterCount++
         $script:RecoveryLastAttempt = $now
@@ -113,11 +113,7 @@ function Complete-AwayRecovery {
 }
 
 function Focus-TeamsWindow {
-    $window = Get-TeamsWindow
-    if ($null -eq $window) { $lblLocalFeedback.Text = 'Nessuna finestra Teams trovata.'; return }
-    if (-not [Win32Window]::FocusWindow($window.Handle)) {
-        $lblLocalFeedback.Text = 'Windows non ha concesso il focus: seleziona Teams nella barra.'
-    } else { $lblLocalFeedback.Text = 'Teams portato in primo piano.' }
+    Request-ManualTeamsFocus
 }
 
 function Save-LocalOptions {
@@ -153,6 +149,16 @@ function Save-LocalOptions {
         $Config['ScheduleFrom'] = $txtScheduleFrom.Text
         $Config['ScheduleTo'] = $txtScheduleTo.Text
         $Config['RecoverAway'] = $chkRecovery.Checked
+        $Config['AutoFocusEnabled'] = $chkAutoFocus.Checked
+        $Config['AutoFocusTrigger'] = @($script:TriggerNames.Keys | Where-Object { $script:TriggerNames[$_] -eq [string]$cmbAutoFocusTrigger.SelectedItem })[0]
+        $Config['AutoFocusIdleSeconds'] = [int]$nudAutoFocusIdle.Value
+        $Config['AutoFocusCooldownSeconds'] = [int]$nudAutoFocusCooldown.Value
+        $Config['AutoFocusMovePointer'] = $chkAutoFocusMouse.Checked
+        $Config['AutoFocusStartJitter'] = $chkAutoFocusJitter.Checked
+        $Config['MascotScalePercent'] = [int]$nudMascotScale.Value
+        $Config['MascotOpacityPercent'] = [int]$nudMascotOpacity.Value
+        $Config['NotificationSound'] = @($script:SoundNames.Keys | Where-Object { $script:SoundNames[$_] -eq [string]$cmbNotificationSound.SelectedItem })[0]
+        $Config['NotificationVolumePercent'] = [int]$nudNotificationVolume.Value
         if (-not (Save-Config)) {
             foreach ($key in $snapshot.Keys) { $Config[$key] = $snapshot[$key] }
             throw 'Salvataggio fallito. La configurazione operativa precedente e stata conservata.'
@@ -162,6 +168,10 @@ function Save-LocalOptions {
         $script:ContactScanDue = Get-Date
         $script:NextPresenceProbeAt = Get-Date
         $script:NextJitterAt = $null
+        $script:AutoFocusRequest = $null
+        $script:AutoFocusAwayFirstRead = $null
+        if ([bool]$Config['AutoFocusEnabled'] -and -not [bool]$snapshot['AutoFocusEnabled']) { $script:AutoFocusSuppressed = $false }
+        Update-MascotAppearance $Config['MascotScalePercent'] $Config['MascotOpacityPercent']
         $lblLocalFeedback.Text = 'Regole salvate. Nuove osservazioni in attesa di conferma.'
         Add-LocalEvent 'Impostazioni' 'Regole locali aggiornate'
     } catch {
@@ -200,9 +210,13 @@ function Update-LocalOperations {
     $now = Get-Date
     $unlocked = [Win32Window]::IsDesktopUnlocked()
     if (-not $unlocked -or -not $script:WasDesktopUnlocked) {
+        $script:AutoFocusAwayFirstRead = $null
+        $script:AutoFocusRequest = $null
         $script:CommittedPresence = 'Unknown'
         $script:PendingPresence = $null
         $script:PendingPresenceSince = $null
+        $script:LastReliablePresence = $null
+        $script:LastReliablePresenceAt = $null
         $script:ContactRuntime = @{}
         $script:LocalGeneration++
         $script:NextJitterAt = $null
@@ -224,6 +238,7 @@ function Update-LocalOperations {
         $script:RecoveryStatus = 'Verde non confermato entro 30 secondi'
         Add-LocalEvent 'Recupero' $script:RecoveryStatus
     }
+    Update-InteractionState
     if ($null -eq $LocalForm -or -not $LocalForm.Visible) { return }
     foreach ($row in $contactGrid.Rows) {
         if ($row.IsNewRow) { continue }
@@ -239,7 +254,7 @@ function Update-LocalOperations {
     if ($null -ne $script:PresenceTask) { $taskState = 'Lettura in corso' }
     $pause = Get-EnginePauseReason
     if (-not $pause) { $pause = 'Nessuna pausa' }
-    $lblDiagnostic.Text = "Versione $AppVersion | UI Automation: $($script:UIAutomationAvailable)`r`nMotore: $($script:IsRunning) | $pause`r`nLettore: $taskState | Ultima lettura: $(Get-TimeText $script:LastPresenceReadAt)`r`nTeams: $($script:PresenceDiagnostic)`r`nRecupero: $($script:RecoveryStatus)`r`nNotifiche contatti silenziate fino a: $(Get-TimeText $script:SnoozeUntil)"
+    $lblDiagnostic.Text = "Versione $AppVersion | UI Automation: $($script:UIAutomationAvailable)`r`nMotore: $($script:IsRunning) | $pause`r`nLettore personale: $taskState | Ultima lettura: $(Get-TimeText $script:LastPresenceReadAt)`r`nTeams: $($script:PresenceDiagnostic)`r`nRecupero: $($script:RecoveryStatus) | Autofocus: $($script:FocusActionStatus)`r`nAudio: $($script:SoundDiagnostic)`r`nNotifiche contatti silenziate fino a: $(Get-TimeText $script:SnoozeUntil)"
     $eventBox.BeginUpdate()
     try {
         $eventBox.Items.Clear()
@@ -378,7 +393,7 @@ function Initialize-LocalOperations {
     $optionsTab.Controls.Add((New-Label 'Quando Windows e bloccato, jitter e lettura contatti sono sospesi. Il ripristino richiede osservazioni nuove.' 20 344 850 40))
     $focusButton = New-LocalButton $optionsTab 'Porta Teams davanti' 20 410 210
     $focusButton.Add_Click({ Focus-TeamsWindow })
-    $optionsTab.Controls.Add((New-Label 'Focus su richiesta: il colore rosso resta visibile nel pannello e non provoca cambi finestra automatici.' 20 458 850 40))
+    $optionsTab.Controls.Add((New-Label 'Configura gli interventi automatici nella scheda Autofocus. Il comando rapido usa le stesse azioni salvate.' 20 458 850 40))
 
     $script:lblDiagnostic = New-Label '' 20 20 880 165 10
     $healthTab.Controls.Add($lblDiagnostic)
@@ -398,6 +413,7 @@ function Initialize-LocalOperations {
     })
     $resumeButton = New-LocalButton $healthTab 'Riattiva alert contatti' 440 475 190
     $resumeButton.Add_Click({ $script:SnoozeUntil = $null })
+    Initialize-InteractionUI -Tabs $tabs
     $saveButton = New-LocalButton $LocalForm 'SALVA REGOLE' 16 602 170
     $saveButton.Add_Click({ Save-LocalOptions })
     $script:lblLocalFeedback = New-Label 'Dati locali. I nomi sono salvati solo nella configurazione; gli stati restano in memoria.' 205 600 750 38 9

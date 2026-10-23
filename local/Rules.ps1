@@ -63,3 +63,40 @@ function Update-ContactObservation {
     }
     return $false
 }
+
+function Test-AutoFocusDue {
+    param($Config, [string]$Reason, [int]$IdleSeconds, [datetime]$Now, $LastAttempt, [bool]$Suppressed, [bool]$Paused)
+    if (-not [bool]$Config['AutoFocusEnabled'] -or $Suppressed -or $Paused) { return $false }
+    if ($IdleSeconds -lt [int]$Config['AutoFocusIdleSeconds']) { return $false }
+    if ($null -ne $LastAttempt -and ($Now - $LastAttempt).TotalSeconds -lt [int]$Config['AutoFocusCooldownSeconds']) { return $false }
+    return ($Config['AutoFocusTrigger'] -eq 'Both' -or $Config['AutoFocusTrigger'] -eq $Reason)
+}
+
+function Get-MascotLayout {
+    param([int]$Scale)
+    $factor = [Math]::Min(200, [Math]::Max(60, $Scale)) / 100.0
+    return @{
+        Width = [int](176 * $factor); Height = [int](192 * $factor)
+        Margin = [int](8 * $factor); PictureWidth = [int](160 * $factor); PictureHeight = [int](150 * $factor)
+        StatusY = [int](160 * $factor); StatusWidth = [int](132 * $factor)
+        StatusHeight = [int](24 * $factor); ArrowWidth = [int](28 * $factor)
+        FontSize = [single][Math]::Max(7, 8 * $factor)
+    }
+}
+
+function Get-QuickContacts {
+    param($People, $Runtime, [datetime]$Now, [bool]$MonitorEnabled, [bool]$WindowAvailable, [int]$StaleSeconds)
+    $count = 0
+    foreach ($person in @($People)) {
+        if (-not [bool]$person.Enabled -or -not (Test-LocalWindow $Now $person.Days $person.From $person.To)) { continue }
+        $state = 'Unknown'; $seen = $null
+        if ($MonitorEnabled -and $WindowAvailable -and $Runtime.ContainsKey($person.Name)) {
+            $entry = $Runtime[$person.Name]
+            $seen = $entry.LastSeen
+            if ($null -ne $seen -and ($Now - $seen).TotalSeconds -le $StaleSeconds) { $state = $entry.State }
+        }
+        [pscustomobject]@{ Name = $person.Name; State = $state; LastSeen = $seen }
+        $count++
+        if ($count -eq 3) { break }
+    }
+}
