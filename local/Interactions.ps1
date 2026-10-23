@@ -5,6 +5,7 @@ $script:AutoFocusLastAttempt = $null
 $script:AutoFocusAwayFirstRead = $null
 $script:AutoFocusPresenceReadAt = $null
 $script:ManualFocusPending = $false
+$script:PendingFocusAction = $null
 $script:FocusActionStatus = 'Nessun autofocus richiesto'
 $script:SoundPlayer = $null
 $script:SoundStream = $null
@@ -124,6 +125,7 @@ function Invoke-ScopedJitter {
 
 function Invoke-TeamsFocusAction {
     param([switch]$Automatic)
+    if ($null -ne $script:PendingFocusAction) { return }
     if ($Automatic) { $script:AutoFocusLastAttempt = Get-Date }
     $pause = Get-EnginePauseReason
     if ($pause) { $script:FocusActionStatus = 'Autofocus sospeso: ' + $pause; return }
@@ -131,19 +133,40 @@ function Invoke-TeamsFocusAction {
     try {
         $window = Get-TeamsWindow
         if ($null -eq $window) { $script:FocusActionStatus = 'Nessuna finestra Teams trovata'; return }
-        if (-not [Win32Window]::FocusWindow($window.Handle) -or -not [Win32Window]::IsForeground($window.Handle)) {
+        $foreground = [Win32Window]::GetForegroundSnapshot()
+        if (-not [Win32Window]::FocusWindow($window.Handle)) {
             $script:FocusActionStatus = 'Windows non ha concesso il focus a Teams'
+            Add-LocalEvent 'Autofocus' $script:FocusActionStatus
             return
         }
+        if (-not [Win32Window]::IsForeground($window.Handle)) {
+            $script:PendingFocusAction = @{
+                Handle = $window.Handle; Automatic = [bool]$Automatic; At = (Get-Date)
+                Source = if ($null -eq $foreground) { [IntPtr]::Zero } else { $foreground.Handle }
+                Retried = $false; Generation = $script:LocalGeneration
+            }
+            $script:FocusActionStatus = 'Attivazione Teams richiesta; attesa del primo piano'
+            return
+        }
+        Complete-TeamsFocusAction $window.Handle
+    } catch { Write-LocalError 'AUTOFOCUS' $_.Exception.GetType().Name; $script:FocusActionStatus = 'Errore durante autofocus Teams' }
+    finally { $lblLocalFeedback.Text = $script:FocusActionStatus }
+}
+
+function Complete-TeamsFocusAction {
+    param([IntPtr]$Handle)
+    try {
+        if (-not [Win32Window]::IsForeground($Handle)) { $script:FocusActionStatus = 'Focus perso prima delle azioni Teams'; return }
         $script:AutoFocusSuppressed = $false
         if ([bool]$Config['AutoFocusMovePointer']) {
-            $area = Get-TeamsClientArea $window.Handle
+            $area = Get-TeamsClientArea $Handle
             if ($null -eq $area) { $script:FocusActionStatus = 'Finestra Teams senza area client utilizzabile'; return }
+            if (-not [Win32Window]::IsForeground($Handle)) { $script:FocusActionStatus = 'Focus perso prima dello spostamento mouse'; return }
             Set-CursorPoint (New-Object Drawing.Point(($area.Left + [int]($area.Width / 2)), ($area.Top + [int]($area.Height / 2))))
         }
         $script:FocusActionStatus = 'Focus Teams confermato'
         if ([bool]$Config['AutoFocusStartJitter']) {
-            $script:TeamsJitterHandle = $window.Handle
+            $script:TeamsJitterHandle = $Handle
             if (-not $script:IsRunning) { Start-Engine -UseSavedConfig }
             if (Invoke-ScopedJitter) {
                 $script:LastJitterAt = Get-Date
@@ -158,8 +181,54 @@ function Invoke-TeamsFocusAction {
     finally { $lblLocalFeedback.Text = $script:FocusActionStatus }
 }
 
+function Receive-TeamsFocusAction {
+    if ($null -eq $script:PendingFocusAction) { return }
+    $request = $script:PendingFocusAction
+    try {
+        $seconds = ((Get-Date) - $request.At).TotalSeconds
+        if ($seconds -gt 3) {
+            $script:PendingFocusAction = $null
+            $script:FocusActionStatus = 'Attivazione Teams scaduta: nessuna azione ritardata eseguita'
+            Add-LocalEvent 'Autofocus' $script:FocusActionStatus
+            return
+        }
+        $window = Get-TeamsWindow
+        if ((Get-EnginePauseReason) -or $request.Generation -ne $script:LocalGeneration -or
+            $null -eq $window -or $window.Handle -ne $request.Handle -or
+            ($request.Automatic -and ($script:AutoFocusSuppressed -or -not [bool]$Config['AutoFocusEnabled'] -or
+                (Get-IdleSeconds) -lt [int]$Config['AutoFocusIdleSeconds']))) {
+            $script:PendingFocusAction = $null
+            $script:FocusActionStatus = 'Attivazione Teams annullata: input, pausa o impostazioni cambiate'
+            return
+        }
+        if ([Win32Window]::IsForeground($request.Handle)) {
+            $script:PendingFocusAction = $null
+            Complete-TeamsFocusAction $request.Handle
+            return
+        }
+        $foreground = [Win32Window]::GetForegroundSnapshot()
+        if ($null -ne $foreground -and $foreground.Handle -ne $request.Source -and $foreground.Handle -ne [IntPtr]::Zero) {
+            $script:PendingFocusAction = $null
+            $script:FocusActionStatus = 'Attivazione Teams annullata: selezionata un altra finestra'
+        } elseif ($seconds -ge 3) {
+            $script:PendingFocusAction = $null
+            $script:FocusActionStatus = 'Windows non ha concesso il primo piano a Teams (solo lampeggio barra)'
+            Add-LocalEvent 'Autofocus' $script:FocusActionStatus
+        } elseif ($seconds -ge 1 -and -not $request.Retried) {
+            $request.Retried = $true
+            $null = [Win32Window]::FocusWindow($request.Handle)
+        }
+    } catch {
+        $script:PendingFocusAction = $null
+        Write-LocalError 'AUTOFOCUS' $_.Exception.GetType().Name
+        $script:FocusActionStatus = 'Errore durante la verifica del focus Teams'
+    } finally { $lblLocalFeedback.Text = $script:FocusActionStatus }
+}
+
 function Update-InteractionState {
-    if ($script:ManualFocusPending) {
+    if ($null -ne $script:PendingFocusAction) {
+        Receive-TeamsFocusAction
+    } elseif ($script:ManualFocusPending) {
         $script:ManualFocusPending = $false
         Invoke-TeamsFocusAction
     } else {
@@ -208,7 +277,7 @@ function Update-MascotQuickMenu {
         if ($index -lt $entries.Count) {
             $entry = $entries[$index]
             $item.Text = '{0} : {1}' -f $entry.Name.Replace('&', '&&'), (Get-PresenceDisplayName $entry.State)
-            $item.ForeColor = if ($entry.State -eq 'Available') { $ColorGreen } elseif ($entry.State -in @('Busy', 'Dnd')) { $ColorRed } else { $ColorText }
+            $item.ForeColor = if ($entry.State -eq 'Available') { $ColorGreen } elseif ($entry.State -in @('Busy', 'Dnd', 'BusyOrDnd')) { $ColorRed } else { $ColorText }
             $item.ToolTipText = 'Ultima lettura: ' + (Get-TimeText $entry.LastSeen)
         }
     }
@@ -228,6 +297,7 @@ function Show-MascotQuickMenu {
 }
 
 function Close-InteractionResources {
+    $script:PendingFocusAction = $null
     Stop-NotificationSound
     if ($null -ne $NotificationTimer) { $NotificationTimer.Stop(); $NotificationTimer.Dispose() }
     if ($null -ne $NotificationForm) { $NotificationForm.Dispose() }

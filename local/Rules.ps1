@@ -30,7 +30,7 @@ function New-ContactRuntime {
 
 function Update-ContactObservation {
     param($Runtime, [string]$State, [datetime]$Now, [string]$Rule, [int]$StaleSeconds, [int]$CooldownSeconds)
-    if ($State -notin @('Available', 'Away', 'Busy', 'Dnd', 'Offline')) {
+    if ($State -notin @('Available', 'Away', 'Busy', 'Dnd', 'Offline', 'BusyOrDnd')) {
         $Runtime.Candidate = $null
         $Runtime.CandidateAt = $null
         $Runtime.State = 'Unknown'
@@ -57,6 +57,10 @@ function Update-ContactObservation {
     $cooldownExpired = $null -eq $Runtime.LastAlert -or ($Now - $Runtime.LastAlert).TotalSeconds -ge $CooldownSeconds
     $matches = $Rule -eq 'Available' -and $State -eq 'Available'
     if ($Rule -eq 'Change') { $matches = $previous -ne 'Unknown' }
+    # A color-only red badge cannot distinguish Busy from Dnd. Changing source
+    # precision is not itself a real presence transition.
+    if (($previous -eq 'BusyOrDnd' -and $State -in @('Busy', 'Dnd')) -or
+        ($State -eq 'BusyOrDnd' -and $previous -in @('Busy', 'Dnd'))) { $matches = $false }
     if ($matches -and $cooldownExpired) {
         $Runtime.LastAlert = $Now
         return $true

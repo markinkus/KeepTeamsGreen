@@ -2,6 +2,7 @@ $script:LocalGeneration = 0
 $script:ContactRuntime = @{}
 $script:ContactScanDue = Get-Date
 $script:LastContactScan = $null
+$script:ContactDiagnostic = 'In attesa della colonna conversazioni'
 $script:LocalErrors = @{}
 $script:LocalEvents = New-Object 'System.Collections.Generic.List[object]'
 $script:SnoozeUntil = $null
@@ -142,6 +143,7 @@ function Save-LocalOptions {
         foreach ($key in $Config.Keys) { $snapshot[$key] = $Config[$key] }
         $Config['Colleagues'] = @($people)
         $Config['MonitorColleagues'] = $chkLocalContacts.Checked
+        $Config['ColleagueReadVisibleBadges'] = $chkVisibleContactBadges.Checked
         $Config['ColleagueScanSeconds'] = [int]$nudContactScan.Value
         $Config['ColleagueCooldownSeconds'] = [int]$nudContactCooldown.Value
         $Config['ScheduleEnabled'] = $chkSchedule.Checked
@@ -169,6 +171,8 @@ function Save-LocalOptions {
         $script:NextPresenceProbeAt = Get-Date
         $script:NextJitterAt = $null
         $script:AutoFocusRequest = $null
+        if ($null -ne $script:PendingFocusAction) { $script:FocusActionStatus = 'Autofocus annullato: impostazioni aggiornate' }
+        $script:PendingFocusAction = $null
         $script:AutoFocusAwayFirstRead = $null
         if ([bool]$Config['AutoFocusEnabled'] -and -not [bool]$snapshot['AutoFocusEnabled']) { $script:AutoFocusSuppressed = $false }
         Update-MascotAppearance $Config['MascotScalePercent'] $Config['MascotOpacityPercent']
@@ -196,6 +200,7 @@ function Export-LocalDiagnostics {
             ColleagueMonitor = [bool]$Config['MonitorColleagues']
             ContactCount = @($Config['Colleagues']).Count
             LastContactRead = $script:LastContactScan
+            ContactReader = $script:ContactDiagnostic
             Errors = @($script:LocalErrors.Keys | ForEach-Object {
                 [pscustomobject]@{ Code = $_; Count = $script:LocalErrors[$_].Count; At = $script:LocalErrors[$_].At }
             })
@@ -212,6 +217,8 @@ function Update-LocalOperations {
     if (-not $unlocked -or -not $script:WasDesktopUnlocked) {
         $script:AutoFocusAwayFirstRead = $null
         $script:AutoFocusRequest = $null
+        if ($null -ne $script:PendingFocusAction) { $script:FocusActionStatus = 'Autofocus annullato: desktop bloccato o appena sbloccato' }
+        $script:PendingFocusAction = $null
         $script:CommittedPresence = 'Unknown'
         $script:PendingPresence = $null
         $script:PendingPresenceSince = $null
@@ -249,12 +256,12 @@ function Update-LocalOperations {
         $row.Cells['Seen'].Value = Get-TimeText $runtime.LastSeen
         $row.Cells['State'].ToolTipText = $runtime.Detail
     }
-    $lblContactHealth.Text = 'Ultima scansione: ' + (Get-TimeText $script:LastContactScan) + ' | Stato corrente solo dopo due letture; nessun dato = Non rilevato.'
+    $lblContactHealth.Text = 'Ultima scansione: ' + (Get-TimeText $script:LastContactScan) + ' | ' + $script:ContactDiagnostic
     $taskState = 'Pronto'
     if ($null -ne $script:PresenceTask) { $taskState = 'Lettura in corso' }
     $pause = Get-EnginePauseReason
     if (-not $pause) { $pause = 'Nessuna pausa' }
-    $lblDiagnostic.Text = "Versione $AppVersion | UI Automation: $($script:UIAutomationAvailable)`r`nMotore: $($script:IsRunning) | $pause`r`nLettore personale: $taskState | Ultima lettura: $(Get-TimeText $script:LastPresenceReadAt)`r`nTeams: $($script:PresenceDiagnostic)`r`nRecupero: $($script:RecoveryStatus) | Autofocus: $($script:FocusActionStatus)`r`nAudio: $($script:SoundDiagnostic)`r`nNotifiche contatti silenziate fino a: $(Get-TimeText $script:SnoozeUntil)"
+    $lblDiagnostic.Text = "Versione $AppVersion | UI Automation: $($script:UIAutomationAvailable)`r`nMotore: $($script:IsRunning) | $pause`r`nLettore personale: $taskState | Ultima lettura: $(Get-TimeText $script:LastPresenceReadAt)`r`nTeams: $($script:PresenceDiagnostic)`r`nContatti: $($script:ContactDiagnostic)`r`nRecupero: $($script:RecoveryStatus) | Autofocus: $($script:FocusActionStatus)`r`nAudio: $($script:SoundDiagnostic)`r`nNotifiche contatti silenziate fino a: $(Get-TimeText $script:SnoozeUntil)"
     $eventBox.BeginUpdate()
     try {
         $eventBox.Items.Clear()
@@ -367,7 +374,9 @@ function Initialize-LocalOperations {
     $snoozeButton.Add_Click({ $script:SnoozeUntil = (Get-Date).AddMinutes(15) })
     $script:lblContactHealth = New-Label '' 20 477 894 26 9
     $contactsTab.Controls.Add($lblContactHealth)
-    $contactsTab.Controls.Add((New-Label 'Lettura passiva: niente login, richieste Graph o apertura automatica di chat. Indicatori assenti o discordanti = Non rilevato.' 20 506 894 32 8))
+    $script:chkVisibleContactBadges = New-DarkCheckBox 'Leggi anche il colore dei badge visibili nella colonna chat (stima locale)' 506 ([bool]$Config['ColleagueReadVisibleBadges'])
+    $chkVisibleContactBadges.Width = 894
+    $contactsTab.Controls.Add($chkVisibleContactBadges)
 
     $script:chkSchedule = New-DarkCheckBox 'Limita la protezione alla fascia oraria' 24 ([bool]$Config['ScheduleEnabled'])
     $optionsTab.Controls.Add($chkSchedule)

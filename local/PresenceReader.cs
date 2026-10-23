@@ -182,7 +182,11 @@ public static class TeamsPresenceProbe {
     }
 
     public static Task<PresenceProbeResult> BeginInspectContacts(IntPtr windowHandle, string[] names) {
-        return Task.Factory.StartNew<PresenceProbeResult>(delegate { return InspectCore(windowHandle, names, false); });
+        return BeginInspectContacts(windowHandle, names, true);
+    }
+
+    public static Task<PresenceProbeResult> BeginInspectContacts(IntPtr windowHandle, string[] names, bool visibleBadges) {
+        return Task.Factory.StartNew<PresenceProbeResult>(delegate { return ConversationPresenceReader.Inspect(windowHandle, names, visibleBadges); });
     }
 }
 }

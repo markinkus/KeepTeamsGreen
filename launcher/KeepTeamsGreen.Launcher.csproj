@@ -13,9 +13,9 @@
     <Company>Markino Solutions</Company>
     <Description>Centrale operativa per presenza Teams e auto-jitter</Description>
     <Copyright>Copyright Markino Solutions</Copyright>
-    <Version>2.3.1.0</Version>
-    <FileVersion>2.3.1.0</FileVersion>
-    <AssemblyVersion>2.3.1.0</AssemblyVersion>
+    <Version>2.3.3.0</Version>
+    <FileVersion>2.3.3.0</FileVersion>
+    <AssemblyVersion>2.3.3.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,6 +27,7 @@
     <Reference Include="WindowsBase" />
     <Compile Include="..\local\PresenceText.cs" Link="PresenceText.cs" />
     <Compile Include="..\local\PresenceReader.cs" Link="PresenceReader.cs" />
+    <Compile Include="..\local\ConversationReader.cs" Link="ConversationReader.cs" />
     <Compile Include="..\local\NotificationAudio.cs" Link="NotificationAudio.cs" />
   </ItemGroup>
 
@@ -37,6 +38,7 @@
     <EmbeddedResource Include="..\local\Operations.ps1" LogicalName="local/Operations.ps1" />
     <EmbeddedResource Include="..\local\PresenceText.cs" LogicalName="local/PresenceText.cs" />
     <EmbeddedResource Include="..\local\PresenceReader.cs" LogicalName="local/PresenceReader.cs" />
+    <EmbeddedResource Include="..\local\ConversationReader.cs" LogicalName="local/ConversationReader.cs" />
     <EmbeddedResource Include="..\local\Interactions.ps1" LogicalName="local/Interactions.ps1" />
     <EmbeddedResource Include="..\local\NotificationAudio.cs" LogicalName="local/NotificationAudio.cs" />
   </ItemGroup>

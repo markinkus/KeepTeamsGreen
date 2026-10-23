@@ -7,7 +7,7 @@
   <img src="logo.png" alt="KeepTeamsGreen Logo" width="220">
 </p>
 
-**KeepTeamsGreen** e un'applicazione open source per Windows che monitora il tempo di inattivita e, quando serve, genera micro-movimenti del cursore. La versione 2.3.1 corregge regressioni del lettore personale e della catena di avviso, mantenendo autofocus configurabile, jitter limitato a Teams, widget ridimensionabile con menu contatti e suoni selezionabili.
+**KeepTeamsGreen** e un'applicazione open source per Windows che monitora il tempo di inattivita e, quando serve, genera micro-movimenti del cursore. La versione 2.3.3 migliora l'attivazione di Teams gia aperto in background e verifica il primo piano prima delle azioni automatiche. Mantiene la lettura contatti dalla colonna conversazioni della 2.3.2, il lettore personale e gli avvisi corretti, il jitter limitato a Teams e il widget personalizzabile.
 
 > [!IMPORTANT]
 > Il tool non modifica la presenza tramite API Microsoft e non promette uno stato che non riesce a verificare. Mantiene attiva la sessione simulando un minimo input del cursore; Teams conserva sempre il controllo finale della presenza.
@@ -47,9 +47,13 @@ Apri **CONTATTI E REGOLE**, aggiungi una persona e scrivi il nome completo esatt
 
 Attiva il monitor e premi **SALVA REGOLE**. Il salvataggio di questa finestra e indipendente dalle impostazioni jitter del pannello principale. La watchlist accetta fino a 40 nomi. Le modifiche alle regole azzerano le osservazioni precedenti.
 
-La lettura e **passiva tramite Windows UI Automation**: Teams deve esporre un indicatore accessibile associato al nome, per esempio nella lista chat visibile. Il tool non apre chat, non scorre la lista e non cerca persone automaticamente. I contatti fuori dall'interfaccia caricata, i nomi non riconosciuti, gli indicatori discordanti e i dati scaduti mostrano **Non rilevato**, mai Offline per deduzione. Gli omonimi non sono distinguibili con certezza: usare solo etichette univoche nella propria interfaccia.
+La lettura e **passiva dalla colonna conversazioni**. Windows UI Automation identifica la riga con il nome completo e cerca il badge nella stessa riga, anche quando nome e avatar sono elementi fratelli o annidati. Le sezioni Preferiti/Chat vengono attraversate; il contenuto della conversazione selezionata sulla destra non viene usato. Il tool non apre chat, non scorre la lista e non cerca persone automaticamente. I contatti fuori dall'interfaccia caricata, i nomi non riconosciuti, le righe duplicate, gli indicatori discordanti e i dati scaduti mostrano **Non rilevato**, mai Offline per deduzione. Gli omonimi non sono distinguibili con certezza: usare solo etichette univoche nella propria interfaccia.
 
-**Non e un monitor contatti garantito in background.** Se la tua versione di Teams espone la presenza solo nella scheda aperta, il tool puo leggerla solo li. La correzione 2.3.1 riconosce anche indicatori annidati nella riga/avatar, quando esposti, ma non rende disponibili dati che Teams non pubblica nell'albero accessibile.
+Se il badge non espone un testo accessibile, **Leggi anche il colore dei badge visibili nella colonna chat** (attivo per default, disattivabile con SALVA REGOLE) tenta una stima leggendo solo un piccolo riquadro di pixel in basso a destra dell'avatar. Occorrono un nome esatto e un solo avatar individuati nella stessa riga tramite accessibilita: non viene effettuato OCR dei nomi o dei messaggi. Il riquadro deve appartenere alla finestra Teams e non essere coperto; Teams minimizzato, cattura fallita o colori/forme ambigui producono Non rilevato. Non vengono salvati screenshot o immagini. Nome e posizione dell'avatar vengono ricontrollati prima e dopo il campionamento per scartare le righe spostate o riciclate da Teams. Il tooltip dello stato indica se la fonte e accessibilita oppure una stima del colore.
+
+Il colore riconosce verde (Disponibile), giallo (Assente) e rosso. Il rosso viene mostrato come **Rosso (Occupato / Non disturbare)**: il solo colore non distingue i due stati, mentre un indicatore accessibile puo distinguerli. Il passaggio da rosso generico a uno stato rosso piu preciso non genera un falso avviso di cambio. Il grigio non viene interpretato come Offline. Temi, zoom e versioni di Teams possono influire sul riconoscimento: il fallback e euristico, non una lettura della presenza server.
+
+**Non e un monitor contatti garantito in background.** Non serve aprire la scheda della persona, ma la sua riga deve essere caricata nella colonna chat. Il fallback visivo richiede inoltre che il badge sia effettivamente sullo schermo e non coperto; nascondere KTG nella tray non impedisce il monitoraggio se Teams resta visibile. Il tool non forza il focus per leggere i contatti. La scheda Diagnostica mostra quante righe sono state esaminate, e il tooltip di ogni stato spiega eventuali dati mancanti.
 
 Ogni stato richiede due letture coerenti distanziate di almeno 3 secondi. La freschezza scade dopo il maggiore tra 45 secondi e tre intervalli di controllo; una lettura senza indicatore invalida subito lo stato. Le letture scadute non generano avvisi di cambio stato. Gli orari si riferiscono al PC; una fascia notturna e attribuita al giorno in cui inizia, e orari uguali significano 24 ore.
 
@@ -66,6 +70,10 @@ Il recupero opzionale esegue un jitter sul passaggio personale confermato **Verd
 In **CONTATTI E REGOLE > Autofocus** abilita l'autofocus e scegli il trigger: Teams Assente, Teams in background o entrambi. Puoi impostare l'attesa di inattivita prima dell'intervento (default 5 secondi) e la pausa fra interventi (default 60 secondi). Il trigger Assente richiede letture confermate. L'autofocus e disabilitato per impostazione predefinita.
 
 Le azioni indipendenti sono **Sposta il puntatore al centro della finestra Teams** e **Avvia auto-jitter su Teams anche se il motore e fermo**. Prima viene richiesto e verificato il focus; solo se riesce vengono eseguite le altre azioni. Se Windows nega il cambio di finestra, il mouse e il motore non vengono modificati. L'autofocus non effettua clic ne cambia lo stato Teams tramite API.
+
+Dalla **2.3.3**, l'attivazione viene richiesta anche quando Teams e gia aperto in secondo piano: la finestra viene mostrata e portata in cima con richieste asincrone, preservando dimensioni e stato massimizzato. Se minimizzata viene ripristinata. Il timer attende fino a 3 secondi e fa al massimo un secondo tentativo dopo 1 secondo, senza bloccare l'interfaccia; una richiesta accettata o l'icona lampeggiante non vengono considerate una conferma di focus. Mouse e jitter scattano solo dopo avere verificato che Teams sia davvero la finestra in primo piano. Stop, blocco Windows, nuove impostazioni, ripresa dell'input durante un tentativo automatico o selezione di un'altra finestra annullano il seguito dell'operazione. Le richieste troppo vecchie (ad esempio dopo una sospensione del PC) vengono scartate.
+
+Windows puo comunque negare l'attivazione da un processo in background: in quel caso puo limitarsi a far lampeggiare l'icona Teams. Il limite viene riportato nella Diagnostica, senza dichiarare un falso successo. Non vengono modificati il registro o le regole globali sul focus, ne inviati tasti/clic sintetici per aggirare il blocco; Teams non viene mantenuto permanentemente in primo piano.
 
 Con l'avvio jitter selezionato, il primo intervento avviene subito; poi si applicano la soglia di inattivita e il range min/max salvati. I movimenti restano entro l'area client di Teams: se il focus passa altrove o il mouse esce dalla finestra, il jitter attende. Se lo spostamento del mouse e disattivato, occorre che il puntatore sia gia nella finestra per eseguire i movimenti.
 
@@ -148,7 +156,7 @@ pwsh -NoProfile -File ./tests/Test-Interactions.ps1
 pwsh -NoProfile -File ./tests/Test-PresencePipeline.ps1
 ```
 
-Il collaudo della pipeline esegue il lettore reale contro un provider UIA simulato e verifica la macchina degli avvisi, i worker separati e il dispatch audio anche quando il popup fallisce. Non verifica la compatibilita con un'installazione reale di Teams ne l'uscita audio del PC.
+Il collaudo della pipeline esegue i lettori reali contro un provider UIA simulato e verifica la macchina degli avvisi, i worker separati, le righe conversazione e il dispatch audio anche quando il popup fallisce. La classificazione visiva usa riquadri sintetici; la cattura viene provata con risposte native simulate (occlusione, minimizzazione, DPI, coordinate negative, identita riciclata e rilascio delle risorse). Non verifica la compatibilita con un'installazione reale di Teams, i colori di ogni tema o l'uscita audio del PC.
 
 Collaudo dell'interfaccia reale su Windows PowerShell 5.1, con configurazione temporanea isolata:
 

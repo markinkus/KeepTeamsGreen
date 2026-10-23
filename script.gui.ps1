@@ -15,7 +15,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 
 $AppName = 'KeepTeamsGreen'
-$AppVersion = '2.3.1'
+$AppVersion = '2.3.3'
 $AppDataDir = Join-Path $env:APPDATA $AppName
 $LogPath = Join-Path $AppDataDir 'last_run.log'
 $ConfigPath = Join-Path $AppDataDir 'config.json'
@@ -182,7 +182,11 @@ public static class Win32Window {
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr handle);
     [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr handle, int command);
+    private static extern bool ShowWindowAsync(IntPtr handle, int command);
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr handle, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr handle);
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr handle);
     [StructLayout(LayoutKind.Sequential)]
@@ -212,8 +216,16 @@ public static class Win32Window {
     }
 
     public static bool FocusWindow(IntPtr handle) {
-        if (IsIconic(handle)) ShowWindow(handle, 9);
-        return SetForegroundWindow(handle);
+        if (handle == IntPtr.Zero || !IsWindow(handle)) return false;
+        if (IsForeground(handle)) return true;
+        // Restore a minimized window; otherwise activate it without changing
+        // its size/maximized state. Cross-process show/Z-order calls are async.
+        bool shown = ShowWindowAsync(handle, IsIconic(handle) ? 9 : 5);
+        bool raised = SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0, 0x4000 | 0x0200 | 0x0040 | 0x0002 | 0x0001);
+        bool requested = SetForegroundWindow(handle);
+        // Accepted means only "request queued". The UI timer must verify the
+        // real foreground window before moving the pointer or starting jitter.
+        return IsForeground(handle) || shown || raised || requested;
     }
 
     private static WindowSnapshot ReadWindow(IntPtr handle) {
@@ -275,7 +287,7 @@ if ($null -eq ('NotificationAudio' -as [type])) {
 }
 
 $script:UIAutomationAvailable = $false
-$presenceProbeSource = (Get-AppResourceText 'local/PresenceText.cs') + [Environment]::NewLine + (Get-AppResourceText 'local/PresenceReader.cs')
+$presenceProbeSource = (Get-AppResourceText 'local/PresenceText.cs') + [Environment]::NewLine + (Get-AppResourceText 'local/PresenceReader.cs') + [Environment]::NewLine + (Get-AppResourceText 'local/ConversationReader.cs')
 
 try {
     Add-Type -AssemblyName UIAutomationClient
@@ -309,6 +321,7 @@ $ConfigDefaults = [ordered]@{
     AlertOnPresenceDrop         = $true
     ShowMascotWhenRunning       = $false
     MonitorColleagues           = $false
+    ColleagueReadVisibleBadges  = $true
     ColleagueScanSeconds        = 15
     ColleagueCooldownSeconds    = 120
     Colleagues                  = @()
@@ -384,6 +397,7 @@ function Normalize-Config {
     $Config['AlertOnPresenceDrop'] = Convert-ToBoolean $Config['AlertOnPresenceDrop'] $true
     $Config['ShowMascotWhenRunning'] = Convert-ToBoolean $Config['ShowMascotWhenRunning'] $false
     $Config['MonitorColleagues'] = Convert-ToBoolean $Config['MonitorColleagues'] $false
+    $Config['ColleagueReadVisibleBadges'] = Convert-ToBoolean $Config['ColleagueReadVisibleBadges'] $true
     $Config['ScheduleEnabled'] = Convert-ToBoolean $Config['ScheduleEnabled'] $false
     $Config['RecoverAway'] = Convert-ToBoolean $Config['RecoverAway'] $false
     $Config['AutoFocusEnabled'] = Convert-ToBoolean $Config['AutoFocusEnabled'] $false
@@ -1057,6 +1071,7 @@ function Get-PresenceDisplayName {
         'Away'      { return 'Assente' }
         'Busy'      { return 'Occupato' }
         'Dnd'       { return 'Non disturbare' }
+        'BusyOrDnd' { return 'Rosso (Occupato / Non disturbare)' }
         'Offline'   { return 'Offline' }
         'Closed'    { return 'Teams chiuso' }
         'Disabled'  { return 'Monitor disattivato' }
@@ -1220,6 +1235,7 @@ function Update-ContactProbe {
             elseif ($script:ContactTaskGeneration -eq $script:LocalGeneration -and $null -ne $script:TeamsWindow -and
                 $script:ContactTaskHandle -eq $script:TeamsWindow.Handle -and
                 ((Get-Date) - $script:ContactTaskStartedAt).TotalSeconds -le 12) {
+                $script:ContactDiagnostic = [string]$script:ContactTask.Result.Diagnostic
                 Receive-ContactReadings $script:ContactTask.Result.Contacts
             }
         } catch { Write-LocalError 'UIA_CONTACT_READ' $_.Exception.GetType().Name }
@@ -1232,7 +1248,7 @@ function Update-ContactProbe {
         $script:ContactTaskHandle = $script:TeamsWindow.Handle
         $script:ContactTaskGeneration = $script:LocalGeneration
         $script:ContactTaskStartedAt = Get-Date
-        $script:ContactTask = [KeepTeamsGreenMonitoring.TeamsPresenceProbe]::BeginInspectContacts($script:TeamsWindow.Handle, [string[]]$names)
+        $script:ContactTask = [KeepTeamsGreenMonitoring.TeamsPresenceProbe]::BeginInspectContacts($script:TeamsWindow.Handle, [string[]]$names, [bool]$Config['ColleagueReadVisibleBadges'])
     } catch { Write-LocalError 'UIA_CONTACT_START' $_.Exception.GetType().Name }
 }
 
@@ -1452,6 +1468,8 @@ function Stop-Engine {
     $script:AutoFocusSuppressed = $true
     $script:TeamsJitterHandle = [IntPtr]::Zero
     $script:AutoFocusRequest = $null
+    if ($null -ne $script:PendingFocusAction) { $script:FocusActionStatus = 'Autofocus annullato da Stop' }
+    $script:PendingFocusAction = $null
     $script:ManualFocusPending = $false
     if (-not $script:IsRunning) { Update-Dashboard; return }
     $script:IsRunning = $false

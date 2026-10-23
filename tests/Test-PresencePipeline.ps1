@@ -9,14 +9,45 @@ $suffix = [guid]::NewGuid().ToString('N')
 $fixtureNamespace = 'KtgPresenceFixture' + $suffix
 $probeNamespace = 'KtgPresenceProbe' + $suffix
 $fixture = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'PresenceFixture.cs')).Replace('KtgPresenceFixture', $fixtureNamespace)
-$reader = [IO.File]::ReadAllText((Join-Path $root 'local/PresenceReader.cs')).Replace('KeepTeamsGreenMonitoring', $probeNamespace).Replace('System.Windows.Automation', $fixtureNamespace).Replace('System.Windows.Rect', "$fixtureNamespace.Rect")
+$reader = ([IO.File]::ReadAllText((Join-Path $root 'local/PresenceReader.cs')) + "`n" + [IO.File]::ReadAllText((Join-Path $root 'local/ConversationReader.cs'))).Replace('KeepTeamsGreenMonitoring', $probeNamespace).Replace('System.Windows.Automation', $fixtureNamespace).Replace('System.Windows.Rect', "$fixtureNamespace.Rect")
+$screen = "$fixtureNamespace.Screen"
+$nativeStubs = @{
+    SetThreadDpiAwarenessContext = "return $screen.SetDpi(context);"
+    WindowFromPhysicalPoint = "return $screen.Owner(point.X, point.Y);"
+    GetAncestor = 'return window;'
+    IsIconic = "return $screen.Minimized;"
+    IsWindowVisible = "return $screen.Visible;"
+    GetDC = "$screen.DcGets++; return $screen.DcFails ? System.IntPtr.Zero : new System.IntPtr(99);"
+    ReleaseDC = "$screen.DcReleases++; return 1;"
+    GetPixel = "return $screen.Pixel(x + $screen.CaptureX, y + $screen.CaptureY);"
+    CreateCompatibleDC = 'return new System.IntPtr(100);'
+    CreateCompatibleBitmap = 'return new System.IntPtr(101);'
+    SelectObject = 'return new System.IntPtr(102);'
+    BitBlt = "$screen.CaptureX = sourceX; $screen.CaptureY = sourceY; return !$screen.CopyFails;"
+    DeleteObject = "$screen.BitmapDeletes++; return true;"
+    DeleteDC = "$screen.MemoryDeletes++; return true;"
+}
+$reader = [regex]::Replace($reader, '\[DllImport\("[^"]+"\)\]\s+private static extern ([^;]+);', [Text.RegularExpressions.MatchEvaluator]{
+    param($match)
+    $signature = $match.Groups[1].Value
+    $method = [regex]::Match($signature, '(\w+)\(').Groups[1].Value
+    if (-not $nativeStubs.ContainsKey($method)) { throw "Missing OS test double: $method" }
+    return 'private static ' + $signature + ' { ' + $nativeStubs[$method] + ' }'
+})
 $text = [IO.File]::ReadAllText((Join-Path $root 'local/PresenceText.cs'))
 $types = @(Add-Type -TypeDefinition ($fixture + "`nnamespace $probeNamespace {`n$text`n}`n" + $reader) -PassThru)
 $elementType = $types | Where-Object FullName -EQ "$fixtureNamespace.AutomationElement"
 $controlType = $types | Where-Object FullName -EQ "$fixtureNamespace.ControlType"
 $probeType = $types | Where-Object FullName -EQ "$probeNamespace.TeamsPresenceProbe"
+$badgeType = $types | Where-Object FullName -EQ "$probeNamespace.VisiblePresenceBadge"
+$conversationType = $types | Where-Object FullName -EQ "$probeNamespace.ConversationPresenceReader"
+$screenType = $types | Where-Object FullName -EQ "$fixtureNamespace.Screen"
 function Node { param([string]$Name, [string]$Id = ''); return New-Object $elementType.FullName -ArgumentList @($Name, $Id) }
-function Window { param([int]$Handle); $node = Node 'Teams'; $node.Cached.BoundingRectangle = New-Object "$fixtureNamespace.Rect"; $elementType::Windows[[IntPtr]$Handle] = $node; return $node }
+function Bounds { param($Node, [double]$X, [double]$Y, [double]$Width, [double]$Height); $rect = New-Object "$fixtureNamespace.Rect"; $rect.Left = $X; $rect.Top = $Y; $rect.Width = $Width; $rect.Height = $Height; $Node.Cached.BoundingRectangle = $rect }
+function Window { param([int]$Handle); $node = Node 'Teams'; Bounds $node 0 0 1400 900; $elementType::Windows[[IntPtr]$Handle] = $node; return $node }
+function Column { param($Window); $node = Node 'Chat' 'chat-pane-list'; $node.Cached.ControlType = $controlType::Tree; Bounds $node 80 100 350 740; $Window.Add($node); return $node }
+function ChatRow { param($Column, [string]$Name, [int]$Y = 150); $row = Node '' 'chat-list-item'; $row.Cached.ControlType = $controlType::ListItem; Bounds $row 90 $Y 330 40; $Column.Add($row); $label = Node $Name; $label.Cached.ControlType = $controlType::Text; Bounds $label 140 ($Y + 8) 200 24; $row.Add($label); return $row }
+function Indicator { param($Row, [string]$State); $badge = Node $State 'presence'; $badge.Cached.ControlType = $controlType::Image; Bounds $badge 118 ($Row.Cached.BoundingRectangle.Top + 24) 8 8; $Row.Add($badge); return $badge }
 function Own { param([int]$Handle); return $probeType::BeginInspect([IntPtr]$Handle, [string[]]@()).Result }
 function Contacts { param([int]$Handle); return $probeType::BeginInspectContacts([IntPtr]$Handle, [string[]]@('Mario Rossi')).Result }
 
@@ -37,20 +68,119 @@ $window = Window 42
 $avatar = Node 'Mario Rossi, Available' 'avatar-presence'
 $window.Add($avatar)
 Check ((Own 42).State -eq 'Unknown') 'A colleague avatar is never the personal state'
+$column = Column $window; $row = ChatRow $column 'Mario Rossi'; $null = Indicator $row 'Available'
 Check ((Contacts 42).Contacts[0].State -eq 'Available') 'Read explicit list/row presence without opening a profile'
-$avatar.Cached.Name = 'Mario Rossi'
+$row.Children.RemoveAt(1)
 $wrapper = Node 'Avatar wrapper'
+Bounds $wrapper 100 150 30 32
 $badge = Node 'Occupato' 'presence-indicator'; $badge.Cached.ControlType = $controlType::Image
-$wrapper.Add($badge); $avatar.Add($wrapper)
+Bounds $badge 118 174 8 8
+$wrapper.Add($badge); $row.Add($wrapper)
 Check ((Contacts 42).Contacts[0].State -eq 'Busy') 'Read a nested accessible avatar badge'
-$window.Add((Node 'Mario Rossi, Available'))
+$duplicate = ChatRow $column 'Mario Rossi' 200; $null = Indicator $duplicate 'Available'
 Check ((Contacts 42).Contacts[0].State -eq 'Unknown') 'Conflicting matching identities must not trigger alerts'
 $window = Window 43
 $body = Node 'Message container' 'message-body'; $body.Add((Node 'Mario Rossi, Available')); $window.Add($body)
 Check ((Contacts 43).Contacts[0].State -eq 'Unknown') 'Message contents are never presence evidence'
 $window = Window 44
-$window.Add((Node 'Mario Rossi, Available')); $broken = Node 'Unavailable branch'; $broken.Unavailable = $true; $window.Add($broken)
+$column = Column $window; $row = ChatRow $column 'Mario Rossi'; $null = Indicator $row 'Available'
+$broken = Node 'Unavailable branch'; Bounds $broken 90 200 330 40; $broken.Unavailable = $true; $column.Add($broken)
 Check ((Contacts 44).Contacts[0].State -eq 'Unknown') 'Partial contact scans remain conservative about ambiguity'
+
+# Conversation column layouts: name and badge are siblings, not one label.
+$window = Window 46; $column = Column $window
+$row = ChatRow $column 'Mario Rossi'; $null = Indicator $row 'Disponibile'
+$broken = Node 'Huge selected conversation'; $broken.Unavailable = $true; $window.Add($broken)
+Check ((Contacts 46).Contacts[0].State -eq 'Available') 'A broken selected conversation on the right cannot invalidate the sidebar'
+$row.Children[0].Cached.Name = 'Mario Rossini'
+Check ((Contacts 46).Contacts[0].State -eq 'Unknown') 'Similar conversation names are not the saved contact'
+$row.Children[0].Cached.Name = 'Mario Rossi'; $row.Cached.IsOffscreen = $true
+Check ((Contacts 46).Contacts[0].State -eq 'Unknown') 'Offscreen chat rows cannot supply a fresh visible presence'
+$row.Cached.IsOffscreen = $false; $row.Cached.AutomationId = 'group-chat-item'
+Check ((Contacts 46).Contacts[0].State -eq 'Unknown') 'Group conversation avatars are not individual contact presence'
+$row.Cached.AutomationId = 'chat-list-item'; $row.Children[1].Cached.HelpText = 'Available'; $row.Children[1].Cached.Name = ''
+Check ((Contacts 46).Contacts[0].State -eq 'Available') 'Explicit badge HelpText is supported'
+$row.Children[1].Cached.HelpText = ''; $row.Children[1].Cached.AutomationId = ''; $row.Children[1].Cached.Name = 'Available'; $row.Children[1].Cached.ControlType = $controlType::Text
+Check ((Contacts 46).Contacts[0].State -eq 'Unknown') 'A message preview saying Available is not a badge'
+$row.Cached.Name = 'Chat con Mario Rossi, Stato: Non disturbare, Ultima attivita ieri'
+Check ((Contacts 46).Contacts[0].State -eq 'Dnd') 'Explicit labelled status on an identified conversation row is supported'
+$row.Cached.Name = 'Chat con Mario Rossi, Available'
+Check ((Contacts 46).Contacts[0].State -eq 'Unknown') 'Unlabelled preview fields must not become presence'
+$row.Cached.Name = ''; $row.Children[1].Cached.ControlType = $controlType::Image; $row.Children[1].Cached.Name = 'Available'
+$duplicate = ChatRow $column 'Mario Rossi' 200
+Check ((Contacts 46).Contacts[0].State -eq 'Unknown') 'Even an unreadable duplicate row makes identity ambiguous'
+$column.Children.Remove($duplicate) | Out-Null
+Check (($conversationType::Inspect([IntPtr]46, [string[]]@('Mario Rossi'), $false)).Contacts[0].State -eq 'Available') 'Disabling pixel fallback does not disable UIA row reading'
+$null = Indicator $row 'Busy'
+Check ((Contacts 46).Contacts[0].State -eq 'Unknown') 'Conflicting badges within one row must not pick the first state'
+$window = Window 47; $column = Column $window
+$section = Node 'Preferiti'; $section.Cached.ControlType = $controlType::TreeItem; Bounds $section 90 120 330 30; $column.Add($section)
+$row = ChatRow $section 'Mario Rossi' 170; $null = Indicator $row 'Available'
+Check ((Contacts 47).Contacts[0].State -eq 'Available') 'Favorite/Chat sections that are TreeItems must not hide their child conversation rows'
+$selected = Node 'Selected conversation'; Bounds $selected 430 100 970 740; $window.Add($selected)
+$null = Contacts 47
+Check ($selected.ChildReads -eq 0) 'Use the discovered column boundary, not half-window geometry, to skip the selected conversation'
+$row.Cached.AutomationId = ''; $row.Cached.ControlType = $controlType::Group
+Check ((Contacts 47).Contacts[0].State -eq 'Available') 'Conversation containers can be groups with a separate name text and badge'
+$row.Cached.ControlType = $controlType::Button
+Check ((Contacts 47).Contacts[0].State -eq 'Available') 'Conversation rows can be wide buttons without a stable AutomationId'
+$window = Window 49; $column = Column $window
+$section = Node ''; $section.Cached.ControlType = $controlType::Group; Bounds $section 90 140 330 160; $column.Add($section)
+$label = Node 'Mario Rossi'; $label.Cached.ControlType = $controlType::Text; Bounds $label 140 155 200 24; $section.Add($label)
+$otherBadge = Node 'Available' 'presence'; $otherBadge.Cached.ControlType = $controlType::Image; Bounds $otherBadge 118 225 8 8; $section.Add($otherBadge)
+Check ((Contacts 49).Contacts[0].State -eq 'Unknown') 'A badge on another vertical row must not attach to the saved name'
+$anotherLabel = Node 'Mario Rossi'; $anotherLabel.Cached.ControlType = $controlType::Text; Bounds $anotherLabel 140 220 200 24; $section.Add($anotherLabel)
+Check ((Contacts 49).Contacts[0].State -eq 'Unknown') 'Repeated identity text on different rows is ambiguous even in an anonymous group container'
+
+# Exercise the real fallback dispatch/capture against controlled OS responses.
+$window = Window 48; $column = Column $window; $row = ChatRow $column 'Mario Rossi'
+$avatar = Node 'Foto del profilo di Mario Rossi' 'avatar-image'; $avatar.Cached.ControlType = $controlType::Image
+Bounds $avatar 100 150 24 24; $row.Add($avatar)
+$screenType::Reset()
+Check ((Contacts 48).Contacts[0].State -eq 'Available') 'An identified row with no UIA status can use its visible avatar badge'
+Check ($screenType::PixelCalls -gt 0 -and $screenType::DcGets -eq $screenType::DcReleases -and $screenType::DpiRestores -eq 1) 'Visual capture releases the DC and restores only its own thread DPI context'
+Check ($screenType::BitmapDeletes -eq 1 -and $screenType::MemoryDeletes -eq 1) 'The in-memory badge bitmap and its DC must be disposed'
+$screenType::Reset(); $screenType::CopyFails = $true
+Check ((Contacts 48).Contacts[0].State -eq 'Unknown' -and $screenType::BitmapDeletes -eq 1 -and $screenType::MemoryDeletes -eq 1) 'A failed screen copy cannot provide presence and must release its resources'
+$screenType::Reset(); $screenType::Blocked = $true
+Check ((Contacts 48).Contacts[0].State -eq 'Unknown' -and $screenType::PixelCalls -eq 0) 'A badge covered by another window must not be sampled'
+Check ($screenType::DcGets -eq $screenType::DcReleases -and $screenType::DpiRestores -eq 1) 'An occlusion early return must still clean up native state'
+$screenType::Reset(); $screenType::CoverDuringRead = $true
+Check ((Contacts 48).Contacts[0].State -eq 'Unknown') 'A covering window appearing during capture invalidates the badge'
+$screenType::Reset(); $screenType::Minimized = $true
+Check ((Contacts 48).Contacts[0].State -eq 'Unknown' -and $screenType::PixelCalls -eq 0) 'Minimized Teams cannot produce visual evidence'
+$screenType::Reset(); $screenType::DpiAllowed = $false
+Check ((Contacts 48).Contacts[0].State -eq 'Unknown' -and $screenType::PixelCalls -eq 0) 'No physical DPI coordinate context means no visual guess'
+$screenType::Reset()
+$null = $conversationType::Inspect([IntPtr]48, [string[]]@('Mario Rossi'), $false)
+Check ($screenType::PixelCalls -eq 0 -and $screenType::DcGets -eq 0) 'Visual opt-out must not access screen pixels'
+$screenType::Reset(); $label = $row.Children[0]; $label.ChangeOnRefresh = $label.Refreshes + 2; $label.ChangedName = 'Another Person'
+Check ((Contacts 48).Contacts[0].State -eq 'Unknown') 'A recycled row changing identity during capture must not leak the old name into a new badge'
+$label.ChangeOnRefresh = 0; $label.Cached.Name = 'Mario Rossi'
+$screenType::Reset(); $screenType::CenterX = -1901; Bounds $avatar -1924 150 24 24
+Check ($badgeType::Read([IntPtr]48, $avatar.Cached.BoundingRectangle) -eq 'Available') 'Physical pixel sampling supports negative-coordinate monitors'
+
+# Synthetic badge tiles test the actual color/shape classifier, not live capture.
+function Tile {
+    param([uint32]$Color)
+    $pixels = New-Object 'uint32[]' 256
+    for ($y = 0; $y -lt 16; $y++) { for ($x = 0; $x -lt 16; $x++) {
+        $pixels[$y * 16 + $x] = 0x202020
+        if (($x - 8) * ($x - 8) + ($y - 8) * ($y - 8) -le 16) { $pixels[$y * 16 + $x] = $Color }
+    } }
+    return ,$pixels
+}
+Check ($badgeType::Classify((Tile 0x30a030), 16) -eq 'Available') 'Compact green badge'
+Check ($badgeType::Classify((Tile 0x20c0f0), 16) -eq 'Away') 'Compact yellow badge (COLORREF channel order)'
+Check ($badgeType::Classify((Tile 0x3030d0), 16) -eq 'BusyOrDnd') 'Red cannot safely distinguish Busy from Dnd'
+Check ($badgeType::Classify((Tile 0x888888), 16) -eq 'Unknown') 'Gray does not mean Offline by deduction'
+$pixels = Tile 0x30a030; $pixels[0] = [uint32]::MaxValue
+Check ($badgeType::Classify($pixels, 16) -eq 'Unknown') 'Failed native pixel reads invalidate the tile'
+$pixels = New-Object 'uint32[]' 256; for ($i = 0; $i -lt 256; $i++) { $pixels[$i] = 0x30a030 }
+Check ($badgeType::Classify($pixels, 16) -eq 'Unknown') 'A green avatar/photo/background is not a compact presence dot'
+$pixels = Tile 0x30a030; for ($x = 0; $x -lt 16; $x++) { $pixels[8 * 16 + $x] = 0x30a030 }
+Check ($badgeType::Classify($pixels, 16) -eq 'Unknown') 'Clipped/elongated colored patches are not badges'
+Check ($badgeType::Classify((New-Object 'uint32[]' 4), 16) -eq 'Unknown') 'Malformed tile is rejected'
 
 # Run real personal state machine with a controlled clock and captured alerts.
 $tokens = $null; $errors = $null

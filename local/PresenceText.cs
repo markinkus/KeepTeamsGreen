@@ -37,6 +37,27 @@ public static class PresenceText {
         return String.Equals(IdentityLabel(value), Clean(identity), StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool ConversationIdentity(string value, string identity) {
+        string label = Regex.Replace((value ?? "").Trim(), @"^(?:chat (?:con|with)|conversation with|conversazione con)\s+", "", RegexOptions.IgnoreCase);
+        string first = label.Split(new char[] { ',', ';', '|', '\n' })[0];
+        return IsIdentity(first, identity);
+    }
+
+    public static string ConversationState(string value, string identity) {
+        if (!ConversationIdentity(value, identity)) return "Unknown";
+        string found = "Unknown";
+        string[] fields = (value ?? "").Split(new char[] { ',', ';', '|', '\n' });
+        for (int i = 1; i < fields.Length; i++) {
+            string field = Clean(fields[i]);
+            if (!Regex.IsMatch(field, @"^(?:status|stato|presence|presenza|availability|disponibilit[aà])\s*:", RegexOptions.IgnoreCase)) continue;
+            string state = State(field);
+            if (state == "Unknown") continue;
+            if (found != "Unknown" && found != state) return "Unknown";
+            found = state;
+        }
+        return found;
+    }
+
     public static string NamedState(string value, string identity) {
         string text = IdentityLabel(value);
         string person = Clean(identity);

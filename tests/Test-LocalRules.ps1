@@ -23,6 +23,11 @@ Assert-Equal ($presenceRules::OwnAccount('Account manager, Available', 'me-contr
 Assert-Equal ($presenceRules::OwnAccount('Account manager', 'me-control', $false)) $true 'Explicit account ID works with custom DPI/layout'
 Assert-Equal ($presenceRules::OwnAccount('Account manager', '', $false)) $false 'Generic label still needs header boundary'
 Assert-Equal ($presenceRules::OwnAccount('Mario Rossi, Available', 'personButton', $false)) $false 'Generic person buttons outside account header are not self'
+Assert-Equal ($presenceRules::ConversationIdentity('Chat con Mario Rossi, Stato: Disponibile', 'Mario Rossi')) $true 'Chat row identity'
+Assert-Equal ($presenceRules::ConversationIdentity("Mario Rossi`nStato: Disponibile", 'Mario Rossi')) $true 'Multiline row identity'
+Assert-Equal ($presenceRules::ConversationIdentity('Mario Rossini, Stato: Disponibile', 'Mario Rossi')) $false 'Chat row prefix collision'
+Assert-Equal ($presenceRules::ConversationState('Mario Rossi, Stato: Disponibile, Ultimo messaggio ieri', 'Mario Rossi')) 'Available' 'Explicit row status'
+Assert-Equal ($presenceRules::ConversationState('Mario Rossi, Disponibile', 'Mario Rossi')) 'Unknown' 'Unlabelled preview field is not presence'
 
 # Windows crossing midnight belong to the day on which they started.
 Assert-Equal (Test-LocalWindow ([datetime]'2026-10-23T23:00:00') 'Weekdays' '22:00' '02:00') $true 'Friday night'
@@ -48,6 +53,16 @@ Assert-Equal (Update-ContactObservation $runtime 'Available' $now.AddSeconds(30)
 Assert-Equal (Update-ContactObservation $runtime 'Available' $now.AddSeconds(45) 'Change' 45 120) $true 'Confirmed change'
 Assert-Equal (Update-ContactObservation $runtime 'Offline' $now.AddMinutes(5) 'Change' 45 120) $false 'Stale gap candidate'
 Assert-Equal (Update-ContactObservation $runtime 'Offline' $now.AddMinutes(5).AddSeconds(15) 'Change' 45 120) $false 'Stale gap is new baseline'
+$runtime = New-ContactRuntime
+Update-ContactObservation $runtime 'Available' $now 'Change' 45 60 | Out-Null
+Update-ContactObservation $runtime 'Available' $now.AddSeconds(5) 'Change' 45 60 | Out-Null
+Assert-Equal (Update-ContactObservation $runtime 'BusyOrDnd' $now.AddSeconds(10) 'Change' 45 60) $false 'Red visual reading needs confirmation'
+Assert-Equal (Update-ContactObservation $runtime 'BusyOrDnd' $now.AddSeconds(15) 'Change' 45 60) $true 'Confirmed green to red alerts'
+Assert-Equal $runtime.State 'BusyOrDnd' 'Keep uncertain red explicit'
+Update-ContactObservation $runtime 'Dnd' $now.AddSeconds(20) 'Change' 45 60 | Out-Null
+Assert-Equal (Update-ContactObservation $runtime 'Dnd' $now.AddSeconds(85) 'Change' 120 60) $false 'Improved precision from red to Dnd is not a presence change'
+Update-ContactObservation $runtime 'BusyOrDnd' $now.AddSeconds(90) 'Change' 120 60 | Out-Null
+Assert-Equal (Update-ContactObservation $runtime 'BusyOrDnd' $now.AddSeconds(95) 'Change' 120 60) $false 'Losing red precision does not generate a change alert'
 
 # Run actual config implementation without starting Forms or touching the user's APPDATA.
 $tokens = $null; $parseErrors = $null
@@ -84,15 +99,18 @@ foreach ($scenario in @(
             Assert-Equal (Test-Path -LiteralPath $ConfigBackupPath) $true 'Backup exists'
             Assert-Equal $Config['AutoFocusEnabled'] $false 'Autofocus opt in'
             Assert-Equal $Config['MascotOpacityPercent'] 96 'Default widget opacity'
+            Assert-Equal $Config['ColleagueReadVisibleBadges'] $true 'Visible badge fallback default'
             $Config['AutoFocusEnabled'] = $true
             $Config['MascotScalePercent'] = 150
             $Config['NotificationSound'] = 'Nuclear'
+            $Config['ColleagueReadVisibleBadges'] = $false
             Assert-Equal (Save-Config) $true 'Interaction settings save'
             $Config['AutoFocusEnabled'] = $false; $Config['MascotScalePercent'] = 100; $Config['NotificationSound'] = 'System'
             Load-Config
             Assert-Equal $Config['AutoFocusEnabled'] $true 'Autofocus reload'
             Assert-Equal $Config['MascotScalePercent'] 150 'Widget reload'
             Assert-Equal $Config['NotificationSound'] 'Nuclear' 'Sound reload'
+            Assert-Equal $Config['ColleagueReadVisibleBadges'] $false 'Visual fallback opt-out survives reload'
         } finally { [IO.Directory]::Delete($AppDataDir, $true) }
     } $configCode $scenario
 }

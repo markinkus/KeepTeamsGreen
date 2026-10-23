@@ -15,7 +15,7 @@ $outputPath = Join-Path $projectDir 'KeepTeamsGreen.exe'
 $nextOutputPath = Join-Path $projectDir 'KeepTeamsGreen.next.exe'
 $backupPath = Join-Path $projectDir 'KeepTeamsGreen.previous.exe'
 $launcherProject = Join-Path $projectDir 'launcher\KeepTeamsGreen.Launcher.csproj'
-$localFiles = @('local/Rules.ps1', 'local/Operations.ps1', 'local/Interactions.ps1', 'local/PresenceText.cs', 'local/PresenceReader.cs', 'local/NotificationAudio.cs')
+$localFiles = @('local/Rules.ps1', 'local/Operations.ps1', 'local/Interactions.ps1', 'local/PresenceText.cs', 'local/PresenceReader.cs', 'local/ConversationReader.cs', 'local/NotificationAudio.cs')
 
 foreach ($requiredPath in @($scriptPath, $logoPath, $iconPath, $launcherProject)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {

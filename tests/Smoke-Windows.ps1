@@ -22,8 +22,10 @@ try {
         if ($MascotForm.Opacity -ne 0.5 -or $MascotForm.ClientSize.Width -ne 264) { throw 'Anteprima widget non applicata' }
         $contactGrid.Rows.Add([object[]]@($true, 'Test Person', 'Available', 'Everyday', '00:00', '00:00', '-', '-')) | Out-Null
         $chkLocalContacts.Checked = $true
+        $chkVisibleContactBadges.Checked = $false
         Save-LocalOptions
         if (@($Config['Colleagues']).Count -ne 1) { throw 'Salvataggio contatti non riuscito' }
+        if ($Config['ColleagueReadVisibleBadges']) { throw 'Disattivazione lettura badge non salvata' }
         if ($Config['MascotScalePercent'] -ne 150 -or $Config['MascotOpacityPercent'] -ne 50) { throw 'Salvataggio widget non riuscito' }
         Update-MascotQuickMenu
         if ($QuickContactItems[0].Text -notlike 'Test Person*') { throw 'Menu rapido contatti non aggiornato' }
